@@ -110,6 +110,8 @@ class TikTokSource(Source):
             ship_by=datetime.fromtimestamp(int(due)) if due else None,
             tracking=d.get("tracking_number") or None,
             needs_arrange=status == "AWAITING_SHIPMENT",
+            waybill_ready=status != "AWAITING_SHIPMENT",
+            platform="tiktok",
             ref={"package_ids": packages},
         )
 
@@ -125,7 +127,7 @@ class TikTokSource(Source):
         method = "PICKUP" if self.arrange_mode == "pickup" else "DROP_OFF"
         for pid in order.ref.get("package_ids", []):
             self._call("POST", f"/fulfillment/202309/packages/{pid}/ship", body={"handover_method": method})
-        order.needs_arrange, order.status = False, "AWAITING_COLLECTION"
+        order.needs_arrange, order.status, order.waybill_ready = False, "AWAITING_COLLECTION", True
         return order
 
     def get_waybill(self, order: Order) -> bytes:

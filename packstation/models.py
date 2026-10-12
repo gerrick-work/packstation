@@ -21,9 +21,11 @@ class Order:
     ship_by: datetime | None = None
     tracking: str | None = None
     needs_arrange: bool = False      # platform still wants pickup/drop-off chosen before a waybill exists
-    has_waybill: bool = True         # False for orders (e.g. Odoo-only) that have no platform waybill
+    has_waybill: bool = True         # a platform order that must ship with a waybill (False: Odoo-only)
+    waybill_ready: bool = True       # the waybill can be fetched right now
+    platform: str = ""               # "shopee" / "tiktok" when the order came from a marketplace
     odoo_picking_id: int | None = None
-    ref: dict = field(default_factory=dict)   # source-specific ids (package ids etc.)
+    ref: dict = field(default_factory=dict)   # source-specific ids (package ids, attachment ids etc.)
 
     @property
     def key(self) -> str:
@@ -31,13 +33,15 @@ class Order:
 
     @property
     def match_code(self) -> str:
-        """Short code printed on every product label so it can be matched to its waybill.
+        """Short code printed on every product label so it can be matched to its waybill: the last
+        4 characters of the tracking number. Empty when there is no tracking number yet (never a
+        made-up code that matches no waybill)."""
+        return (self.tracking or "")[-4:].upper()
 
-        The last 4 characters of the tracking number (printed big on the waybill),
-        falling back to the last 4 of the order id.
-        """
-        base = self.tracking or self.order_id
-        return base[-4:].upper()
+    @property
+    def waybill_missing(self) -> bool:
+        """A marketplace order whose waybill isn't available and can't be arranged now."""
+        return self.has_waybill and not self.waybill_ready and not self.needs_arrange
 
     @property
     def unit_count(self) -> int:

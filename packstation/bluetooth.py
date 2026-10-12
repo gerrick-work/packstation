@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import threading
 
+from .errors import PackError
+
 # Write characteristics used by common Bluetooth label/receipt printer modules, best first.
 KNOWN_WRITE_CHARS = [
     "49535343-8841-43f4-a8d4-ecbe34729bb3",  # Microchip/ISSC transparent UART
@@ -77,33 +79,65 @@ class BleLink:
     def _run(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(self.timeout)
 
-    async def _connect(self):
+    async def _connect(self, progress):
         from bleak import BleakClient, BleakScanner
 
         if self.client is not None and self.client.is_connected:
             return
-        dev = await BleakScanner.find_device_by_address(self.address, timeout=10)
+        progress("connecting", 0)
+        try:
+            dev = await BleakScanner.find_device_by_address(self.address, timeout=10)
+        except Exception as e:  # CoreBluetooth refuses when Bluetooth permission is missing
+            raise _bt_error(e, "connecting to printer") from e
         if dev is None:
-            raise RuntimeError("Printer not found over Bluetooth. Is it switched on, and is the phone app "
-                               "(Label Expert) disconnected from it?")
-        self.client = BleakClient(dev)
-        await self.client.connect()
+            raise PackError("BT-NOTFOUND", "connecting to printer")
+        try:
+            self.client = BleakClient(dev)
+            await self.client.connect()
+        except Exception as e:
+            raise _bt_error(e, "connecting to printer") from e
         uuid, nores = pick_write_char(self.client.services)
         if self.char_uuid:
             uuid = self.char_uuid
         self.char_uuid, self.nores = uuid, nores
 
-    async def _send(self, data: bytes):
-        await self._connect()
+    async def _send(self, data: bytes, progress):
+        await self._connect(progress)
         size = max(20, min(self.chunk, (getattr(self.client, "mtu_size", 23) or 23) - 3))
+        total = max(1, len(data))
+        sent = 0
+        progress("sending", 0)
         for part in chunks(data, size):
             await self.client.write_gatt_char(self.char_uuid, part, response=not self.nores)
+            sent += len(part)
+            progress("sending", int(sent * 100 / total))
             if self.delay:
                 await asyncio.sleep(self.delay)
 
-    def send(self, data: bytes) -> None:
+    def send(self, data: bytes, progress=None) -> None:
+        progress = progress or (lambda stage, pct: None)
         try:
-            self._run(self._send(data))
-        except Exception:
-            self.client = None  # reconnect on the next print
+            self._run(self._send(data, progress))
+        except PackError:
+            self.client = None
             raise
+        except Exception as e:
+            self.client = None  # reconnect on the next print
+            raise _bt_error(e, "sending to printer") from e
+
+    def close(self) -> None:
+        if self.client is not None:
+            try:
+                self._run(self.client.disconnect())
+            except Exception:
+                pass
+            self.client = None
+
+
+def _bt_error(e: Exception, step: str) -> PackError:
+    low = str(e).lower()
+    if any(w in low for w in ("unauthorized", "not authorized", "permission", "denied", "poweredoff", "powered off")):
+        return PackError("BT-PERMISSION", step, str(e)[:160])
+    if any(w in low for w in ("not found", "no device", "was not found")):
+        return PackError("BT-NOTFOUND", step, str(e)[:160])
+    return PackError("BT-SEND", step, str(e)[:160])

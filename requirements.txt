@@ -4,3 +4,4 @@ pillow>=10.0
 pypdfium2>=4.20
 tomli>=2.0; python_version < "3.11"
 bleak>=0.22
+qrcode>=7.4

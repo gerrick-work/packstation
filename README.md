@@ -1,28 +1,31 @@
 # atlasdsf
 
-## Pack Station: one-click waybills and product labels
+## Pack Station: one-click waybills and bottle labels
 
-A touch-friendly station for the packing Mac (it also works on an iPad or phone on the same
-Wi-Fi). It scans Shopee, TikTok Shop and Odoo for orders that are ready to pack, and does
-everything from one screen:
+A touch-friendly station that runs on the packing Mac and opens on any phone or iPad on the same
+Wi-Fi (Settings shows a QR code; "Add to Home Screen" gives it an app icon). It reads ready-to-ship
+deliveries from Odoo, with waybills from the Odoo Shopee and TikTok connectors, and prints them on
+two AiYin E40 Pro printers over Bluetooth.
 
-- **Orders:** every order as a card with its match code, items, ship-by time (amber = today,
-  red = late) and status. Tap the tiles to filter: To print, Needs arranging, Printed, Packed.
-  **Print all** prints every pending order with a progress bar: for each order, its **waybill**
-  on the waybill printer, then its **product labels** (one per unit) on the label printer, in
-  the same order. Tap a card to preview its labels, print or reprint it, or mark it packed.
-- **Pack check:** scan the waybill (any USB barcode scanner works), or type the order number or
-  `#code`. The order's items show as big tiles; tap each one as it goes in. The order is only
-  marked packed once every item is ticked, with a beep for right and wrong.
-- **Labels:** the product label list, editable on screen with a live preview of each label,
-  plus a test print per product.
-- **Printers:** what each printer is set to, with test-print buttons.
-
-Every product label carries a **match code**: the last 4 characters of the tracking number,
-which is printed on the waybill too (for example `#871A`). Orders are remembered once printed,
-so Print all never prints anything twice.
-
-![Pack Station](docs/screenshot.png)
+- **Refresh** runs Odoo's Shopee/TikTok sync jobs first (Shopee orders, TikTok orders, TikTok
+  delivery sync, Shopee labels), then re-reads everything and says "Refresh successful HH:MM:SS,
+  N new orders". The Odoo user needs Settings/Administrator rights for this.
+- **Print all** prints, order by order: the waybill (at its real size, no rescaling) on the waybill
+  printer, then that order's bottle labels, then one blank label. An order is marked printed only
+  when all of it was sent. TikTok orders still needing a courier are booked only after you confirm
+  on screen (drop-off or pickup, set in Settings).
+- Orders with no waybill show **WAYBILL-MISSING**: never printed, never marked, no Odoo note.
+- **Bottle labels** use one fixed template (Label Expert "Atlas Origin Finalv1"); the product list
+  is edited on the Labels screen and kept in `data/products.csv`. Default brand: "atlas origins".
+- **Printers** screen: calibration page (border, mm ruler, centre cross), nudge buttons for
+  left/right, up/down and label gap, separator choice, test prints.
+- Live status per printer ("Order #278A, label 2 of 3", sending %), persistent results with times,
+  a lock per order across all devices, and "Already printed at HH:MM, print again?".
+- Fixed **error codes** (ODOO-AUTH, ODOO-NET, ODOO-CRON, WAYBILL-MISSING, TIKTOK-ARRANGE,
+  BT-NOTFOUND, BT-PERMISSION, BT-SEND, PRINT-PARTIAL, CONFIG) on cards, the status bar, the Log
+  screen and `data/packstation.log`.
+- Settings: TikTok courier type, default brand, optional 4-digit PIN for other devices,
+  **Install an update** (choose the GitHub ZIP; keeps config.toml and data/) and **Restart**.
 
 ### Start it
 

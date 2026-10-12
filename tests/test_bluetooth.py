@@ -82,5 +82,7 @@ def test_bluetooth_printer_sends_whole_tspl_job_in_chunks(fake_bleak, tmp_path):
 
 def test_missing_printer_gives_plain_advice(fake_bleak, tmp_path):
     p = build_printer("label", {"backend": "bluetooth", "ble_address": "OTHER", "ble_delay_ms": 0}, str(tmp_path))
-    with pytest.raises(RuntimeError, match="Label Expert"):
+    from packstation.errors import PackError
+    with pytest.raises(PackError, match="Label Expert") as e:
         p.print_image(Image.new("1", (400, 200), 1), "x")
+    assert e.value.code == "BT-NOTFOUND"

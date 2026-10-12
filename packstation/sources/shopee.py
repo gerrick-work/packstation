@@ -146,6 +146,8 @@ class ShopeeSource(Source):
             status=status,
             ship_by=datetime.fromtimestamp(ship_by) if ship_by else None,
             needs_arrange=status == "READY_TO_SHIP",
+            waybill_ready=status != "READY_TO_SHIP",
+            platform="shopee",
             ref={"package_number": packages[0].get("package_number") if len(packages) == 1 else None,
                  "carrier": d.get("shipping_carrier", "")},
         )
@@ -176,6 +178,7 @@ class ShopeeSource(Source):
             tn = self._tracking(order.order_id)
             if tn:
                 order.tracking, order.needs_arrange, order.status = tn, False, "PROCESSED"
+                order.waybill_ready = True
                 return order
         raise RuntimeError("Shipment arranged but Shopee has not issued a tracking number yet; try again shortly")
 

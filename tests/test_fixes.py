@@ -1,0 +1,469 @@
+"""Tests for the 12 Oct 2026 Pack Station fix list (one section per fix)."""
+import base64
+import io
+import time
+import tomllib
+import xmlrpc.client
+
+import pytest
+from PIL import Image, ImageDraw
+
+from packstation import config as config_mod
+from packstation.engine import Busy, Engine
+from packstation.errors import PackError
+from packstation.labels import LabelData, render_product_label
+from packstation.models import Item, Order
+from packstation.printers import build_printer, calibration_image, tspl_feed
+from packstation.sources.demo import DemoSource
+from packstation.sources.odoo import OdooSource
+
+
+def pdf_bytes(w_mm=105, h_mm=148, bar_from_left_mm=10):
+    """An A6 'waybill' PDF with a 1mm black bar a known distance from the left edge."""
+    dpi = 203
+    w, h = round(w_mm / 25.4 * dpi), round(h_mm / 25.4 * dpi)
+    im = Image.new("L", (w, h), 255)
+    x = round(bar_from_left_mm / 25.4 * dpi)
+    ImageDraw.Draw(im).rectangle((x, 100, x + 7, 300), fill=0)
+    buf = io.BytesIO()
+    im.save(buf, "PDF", resolution=dpi)
+    return buf.getvalue()
+
+
+def write_cfg(tmp_path, extra=""):
+    p = tmp_path / "config.toml"
+    p.write_text(f'''[app]
+data_dir = "{tmp_path / 'data'}"
+
+[printers.waybill]
+backend = "file"
+width_mm = 100
+height_mm = 150
+
+[printers.label]
+backend = "file"
+width_mm = 40
+height_mm = 20
+{extra}''')
+    return config_mod.load(p)
+
+
+# ---------------------------------------------------------------- fake Odoo with both connectors
+
+class FakeOdoo:
+    def __init__(self):
+        self.calls = []
+        self.att = {501: base64.b64encode(pdf_bytes()).decode(), 777: base64.b64encode(pdf_bytes()).decode()}
+        self.pickings = {
+            73: {"id": 73, "name": "WH/OUT/00073", "origin": "S00073", "scheduled_date": "2026-10-12 10:00:00",
+                 "date_deadline": False, "sale_id": [9, "S00073"], "move_ids": [1],
+                 "carrier_tracking_ref": False, "tiktok_delivery_status": "confirmed",
+                 "tiktok_label_attachment_id": False, "shopee_label_status": False, "shopee_label_attachment_id": False},
+            80: {"id": 80, "name": "WH/OUT/00080", "origin": "S00080", "scheduled_date": "2026-10-12 09:00:00",
+                 "date_deadline": False, "sale_id": [10, "S00080"], "move_ids": [2],
+                 "carrier_tracking_ref": "SPXMY0601278A", "tiktok_delivery_status": False,
+                 "tiktok_label_attachment_id": False, "shopee_label_status": "stored",
+                 "shopee_label_attachment_id": [501, "label.pdf"]},
+            81: {"id": 81, "name": "WH/OUT/00081", "origin": "S00081", "scheduled_date": "2026-10-12 11:00:00",
+                 "date_deadline": False, "sale_id": [11, "S00081"], "move_ids": [3],
+                 "carrier_tracking_ref": False, "tiktok_delivery_status": False,
+                 "tiktok_label_attachment_id": False, "shopee_label_status": "pending",
+                 "shopee_label_attachment_id": False},
+            90: {"id": 90, "name": "WH/OUT/00090", "origin": "S00090", "scheduled_date": "2026-10-12 12:00:00",
+                 "date_deadline": False, "sale_id": False, "move_ids": [4],
+                 "carrier_tracking_ref": False, "tiktok_delivery_status": False,
+                 "tiktok_label_attachment_id": False, "shopee_label_status": False,
+                 "shopee_label_attachment_id": False},
+        }
+        self.cron_fail = None
+        self.wizard_vals = None
+
+    def __call__(self, model, method, *args, **kw):
+        self.calls.append((model, method, args, kw))
+        if model == "stock.picking" and method == "fields_get":
+            return {n: {"type": "many2one", "relation": "ir.attachment"} if n.endswith("attachment_id")
+                    else {"type": "char"} for n in self.pickings[73]}
+        if model == "stock.picking" and method in ("search_read", "read"):
+            ids = args[0] if method == "read" else list(self.pickings)
+            return [dict(self.pickings[i]) for i in ids]
+        if model == "stock.move" and method == "read":
+            return [{"id": i, "product_id": [100 + i, "x"], "product_uom_qty": 2.0 if i == 1 else 1.0} for i in args[0]]
+        if model == "product.product" and method == "read":
+            return [{"id": i, "default_code": f"ML-{i}", "display_name": f"Linalool {i} 3g"} for i in args[0]]
+        if model == "sale.order" and method == "read":
+            return [{"id": i, "client_order_ref": f"PLAT{i}"} for i in args[0]]
+        if model == "ir.attachment" and method == "read":
+            return [{"id": i, "datas": self.att[i], "mimetype": "application/pdf", "name": "l.pdf"} for i in args[0]]
+        if model == "stock.picking" and method == "action_tiktok_ship_order":
+            return {"type": "ir.actions.act_window", "res_model": "tiktok.picking.ship.wizard",
+                    "context": {"default_picking_id": args[0][0]}}
+        if model == "tiktok.picking.ship.wizard" and method == "fields_get":
+            return {"handover_method": {"type": "selection", "selection": [["drop_off", "Drop off"], ["pickup", "Pickup"]]},
+                    "note": {"type": "char"}}
+        if model == "tiktok.picking.ship.wizard" and method == "create":
+            self.wizard_vals = args[0]
+            return 5
+        if model == "tiktok.picking.ship.wizard" and method == "get_views":
+            return {"views": {"form": {"arch": '<form><footer><button name="action_cancel" type="object"/>'
+                                               '<button name="action_confirm_ship" type="object" class="btn-primary"/></footer></form>'}}}
+        if model == "tiktok.picking.ship.wizard" and method == "action_confirm_ship":
+            p = self.pickings[73]
+            p.update(tiktok_delivery_status="ready_to_ship", carrier_tracking_ref="MYTT00099X")
+            return True
+        if model == "stock.picking" and method == "action_tiktok_sync_pickings":
+            p = self.pickings[73]
+            if p["tiktok_delivery_status"] == "ready_to_ship":
+                p["tiktok_label_attachment_id"] = [777, "tt.pdf"]
+            return True
+        if model == "ir.cron" and method == "method_direct_trigger":
+            if self.cron_fail:
+                raise self.cron_fail
+            return True
+        if model == "ir.cron" and method == "read":
+            return [{"id": i, "cron_name": {73: "Shopee: sync orders", 77: "TikTok: sync orders",
+                                            74: "Shopee: sync shipping labels"}[i]} for i in args[0]]
+        if method == "message_post":
+            return 1
+        raise AssertionError((model, method))
+
+
+@pytest.fixture
+def odoo_engine(tmp_path):
+    fake = FakeOdoo()
+    src = OdooSource({}, rpc=fake, sleep=lambda s: None)
+    eng = Engine(write_cfg(tmp_path), sources=[src])
+    eng.scan()
+    return eng, fake
+
+
+def by_name(eng):
+    return {o.order_id: o for o in eng.orders}
+
+
+# ---------------------------------------------------------------- 1. margins / template / native waybill
+
+def test_offsets_move_the_print_and_calibration_page(tmp_path):
+    p = build_printer("label", {"backend": "file", "width_mm": 40, "height_mm": 20, "offset_x_mm": 2,
+                                "offset_y_mm": -1}, str(tmp_path))
+    im = Image.new("L", (320, 160), 255)
+    ImageDraw.Draw(im).rectangle((0, 20, 3, 23), fill=0)
+    page = p.prepare(im)
+    xs = [x for x in range(page.width) for y in range(page.height) if page.getpixel((x, y)) == 0]
+    assert min(xs) == round(2 / 25.4 * 203)                  # 2 mm right
+    cal = calibration_image(320, 160, 203, "X +0.0")
+    assert cal.size == (320, 160) and cal.getpixel((0, 80)) == 0   # border at the edge
+
+
+def test_waybill_prints_at_native_size_not_rescaled(tmp_path):
+    p = build_printer("waybill", {"backend": "file", "width_mm": 100, "height_mm": 150}, str(tmp_path))
+    from packstation.printers import pdf_to_image
+    page = p.prepare(pdf_to_image(pdf_bytes(bar_from_left_mm=10), 203), native=True)
+    assert page.size == p.dots == (799, 1199)               # 100 x 150 mm at 203 dpi
+    xs = [x for x in range(page.width) if page.getpixel((x, 200)) == 0]
+    # A6 is 105mm wide, so 2.5mm is trimmed from each side: bar lands at 10 - 2.5 = 7.5mm, width kept (8 dots)
+    assert abs(min(xs) - round(7.5 / 25.4 * 203)) <= 1 and 7 <= len(xs) <= 9
+
+
+def test_bottle_label_template_is_fixed_whatever_the_title():
+    a = render_product_label(LabelData("Sandalwood", "3g", "atlas origins", ""), "278A", 40, 20)
+    b = render_product_label(LabelData("Isoamyl Acetate Natural", "3g", "atlas origins", ""), "278A", 40, 20)
+    lower = (0, 70, 320, 160)   # size line, brand line, match code: identical positions
+    assert a.crop(lower).tobytes() == b.crop(lower).tobytes()
+    w = []
+    render_product_label(LabelData("A Very Long Material Name Indeed", "3g", "atlas origins", ""), None, 40, 20, warnings=w)
+    assert w and "too long" in w[0]
+
+
+def test_default_brand_is_atlas_origins(tmp_path):
+    from packstation.labels import Catalog
+    cat = Catalog(data_dir=tmp_path)
+    data, _ = cat.lookup(Item("NEW-SKU", "Vanillin 10g", 1))
+    assert data.brand == "atlas origins" and (tmp_path / "products.csv").exists()
+
+
+def test_printer_settings_saved_from_ui_hot_reload(tmp_path):
+    from packstation.web import create_app
+    eng = Engine(write_cfg(tmp_path), sources=[DemoSource()])
+    c = create_app(eng).test_client()
+    r = c.post("/api/printer/label", json={"offset_x_mm": 0.5, "offset_y_mm": -0.5, "gap_mm": 3, "separator": "none"})
+    assert r.get_json()["ok"]
+    saved = tomllib.loads((tmp_path / "config.toml").read_text())["printers"]["label"]
+    assert saved["offset_x_mm"] == 0.5 and saved["gap_mm"] == 3 and saved["separator"] == "none"
+    assert eng.label_printer.offset_x_mm == 0.5 and eng.label_cfg["separator"] == "none"
+    assert c.post("/api/printer/label", json={"offset_x_mm": 99}).status_code == 400
+    job = c.post("/api/calibrate/label").get_json()["job"]
+    eng.wait(eng.jobs[0])
+    assert eng.jobs[0].state == "done" and "calibration" in eng.jobs[0].summary.lower(), job
+
+
+# ---------------------------------------------------------------- 2. TikTok / Shopee waybills from connector fields
+
+def test_waybills_come_from_connector_fields(odoo_engine):
+    eng, fake = odoo_engine
+    o = by_name(eng)
+    assert o["WH/OUT/00080"].platform == "shopee" and o["WH/OUT/00080"].waybill_ready
+    assert o["WH/OUT/00073"].platform == "tiktok" and o["WH/OUT/00073"].needs_arrange
+    assert o["WH/OUT/00081"].waybill_missing                 # shopee label not "stored"
+    assert not o["WH/OUT/00090"].has_waybill                  # Odoo-only order
+    assert eng.odoo.get_waybill(o["WH/OUT/00080"])[:4] == b"%PDF"
+
+
+def test_tiktok_needs_on_screen_confirmation_then_books_courier(odoo_engine, tmp_path):
+    eng, fake = odoo_engine
+    assert "odoo:WH/OUT/00073" in eng.plan()["arrange"]
+    eng.wait(eng.start_print_all(arrange=False))
+    assert not any(c[1] == "action_tiktok_ship_order" for c in fake.calls)   # nothing booked without a yes
+    assert "odoo:WH/OUT/00073" not in eng.store.printed()
+
+    job = eng.wait(eng.start_print_one("odoo:WH/OUT/00073", arrange=True))
+    assert job.state == "done", job.as_dict()
+    assert fake.wizard_vals == {"handover_method": "drop_off"}               # ship method from settings
+    assert [c[1] for c in fake.calls if c[0] == "tiktok.picking.ship.wizard"][-1] == "action_confirm_ship"
+    assert eng.store.printed_rows()["odoo:WH/OUT/00073"]["tracking"] == "MYTT00099X"
+    assert by_name(eng)["WH/OUT/00073"].match_code == "099X"
+
+
+def test_tiktok_label_never_arrives_gives_tiktok_arrange(odoo_engine):
+    eng, fake = odoo_engine
+    fake.att.pop(777)
+    orig = fake.__call__
+
+    def no_label(model, method, *a, **kw):
+        if method == "action_tiktok_sync_pickings":
+            fake.calls.append((model, method, a, kw))
+            return True
+        return orig(model, method, *a, **kw)
+
+    eng.odoo._rpc = no_label
+    job = eng.wait(eng.start_print_one("odoo:WH/OUT/00073", arrange=True))
+    assert job.error["code"] == "TIKTOK-ARRANGE"
+    assert "odoo:WH/OUT/00073" not in eng.store.printed()
+
+
+# ---------------------------------------------------------------- 3. no-waybill orders never "printed"
+
+def test_waybill_missing_never_printed_marked_or_noted(odoo_engine, tmp_path):
+    eng, fake = odoo_engine
+    job = eng.wait(eng.start_print_all())
+    res = {r.key: r for r in job.results}
+    assert res["odoo:WH/OUT/00081"].error["code"] == "WAYBILL-MISSING"
+    printed = eng.store.printed()
+    assert "odoo:WH/OUT/00081" not in printed and "odoo:WH/OUT/00073" not in printed
+    assert "odoo:WH/OUT/00080" in printed and "odoo:WH/OUT/00090" in printed
+    notes = [c for c in fake.calls if c[1] == "message_post"]
+    assert [c[2][0] for c in notes] == [[80]]                 # only the order with a real waybill
+    assert "SPXMY0601278A" in notes[0][3]["body"] and "#278A" in notes[0][3]["body"]
+    assert by_name(eng)["WH/OUT/00081"].match_code == ""        # no made-up code like #0081
+
+
+def test_bad_printed_record_for_00073_is_removed(tmp_path):
+    from packstation.store import Store
+    (tmp_path / "data").mkdir()
+    st = Store(tmp_path / "data")
+    st.mark("odoo:WH/OUT/00073", None, 2)
+    st.mark("odoo:WH/OUT/00011", None, 1)
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=FakeOdoo())])
+    assert "odoo:WH/OUT/00073" not in eng.store.printed()
+    assert "odoo:WH/OUT/00011" in eng.store.printed()            # unrelated record left alone
+
+
+# ---------------------------------------------------------------- 4. refresh runs the whole chain
+
+def test_refresh_triggers_crons_in_order_then_rescans(odoo_engine):
+    eng, fake = odoo_engine
+    fake.calls.clear()
+    job = eng.wait(eng.start_refresh())
+    seq = [(c[1], c[2][0] if c[2] else None) for c in fake.calls
+           if c[1] in ("method_direct_trigger", "action_tiktok_sync_pickings")]
+    assert seq == [("method_direct_trigger", [73]), ("method_direct_trigger", [77]),
+                   ("action_tiktok_sync_pickings", [73]), ("method_direct_trigger", [74])]
+    assert job.state == "done" and job.summary.startswith("Refresh successful") and "0 new orders" in job.summary
+    assert [s["state"] for s in job.steps] == ["done"] * 5
+    assert job.steps[0]["name"] == "Odoo: Shopee: sync orders"
+
+
+def test_refresh_without_admin_rights_is_odoo_cron(odoo_engine):
+    eng, fake = odoo_engine
+    fake.cron_fail = xmlrpc.client.Fault(1, "AccessError: You are not allowed to modify 'Scheduled Actions'")
+    job = eng.wait(eng.start_refresh())
+    assert job.state == "error" and job.error["code"] == "ODOO-CRON"
+    assert "Administrator" in job.error["detail"] and job.steps[0]["state"] == "error"
+    assert not any(c[1] == "action_tiktok_sync_pickings" for c in fake.calls[-3:])   # stopped at the failed step
+
+
+# ---------------------------------------------------------------- 5. blank label between orders
+
+def test_blank_label_after_each_order(tmp_path):
+    eng = Engine(write_cfg(tmp_path), sources=[DemoSource()])
+    eng.scan()
+    eng.wait(eng.start_print_all())
+    files = sorted(p.name for p in (tmp_path / "data" / "output").glob("*/label/*"))
+    seps = [i for i, n in enumerate(files) if "blank-label" in n]
+    assert len(seps) == 3                                   # one after each of the 3 orders
+    assert "DEMO10001" in files[seps[0] - 1] and "DEMO10002" in files[seps[0] + 1]
+    assert tspl_feed(40, 20, 2).endswith(b"FORMFEED\r\n")
+
+
+def test_separator_none(tmp_path):
+    eng = Engine(write_cfg(tmp_path, 'separator = "none"'), sources=[DemoSource()])
+    eng.scan()
+    eng.wait(eng.start_print_all())
+    assert not list((tmp_path / "data" / "output").glob("*/label/*blank-label*"))
+
+
+# ---------------------------------------------------------------- 6. status + no double printing
+
+def test_order_lock_blocks_double_print(tmp_path):
+    eng = Engine(write_cfg(tmp_path), sources=[DemoSource()])
+    eng.scan()
+    gate = __import__("threading").Event()
+    eng.submit("hold", "hold", lambda job: gate.wait(5), {"demo:DEMO10001"})
+    with pytest.raises(Busy):
+        eng.start_print_one("demo:DEMO10001")
+    assert eng.state_of(eng.orders[0], {}, {}) == "busy"
+    gate.set()
+
+
+def test_marked_printed_only_after_whole_order_sent(tmp_path):
+    eng = Engine(write_cfg(tmp_path), sources=[DemoSource()])
+    eng.scan()
+    sent = []
+    real = eng.label_printer._send_page
+
+    def flaky(page, label):
+        sent.append(label)
+        if len(sent) == 2:
+            raise PackError("BT-SEND", "sending to printer")
+        return real(page, label)
+
+    eng.label_printer._send_page = flaky
+    job = eng.wait(eng.start_print_one("demo:DEMO10001"))
+    assert job.error["code"] == "PRINT-PARTIAL" and "label 2 of 2" in job.error["step"]
+    assert "demo:DEMO10001" not in eng.store.printed()
+    assert eng.label_printer.status.state in ("idle", "done", "sending")
+
+
+def test_printer_status_reports_progress(tmp_path):
+    from packstation.printers import BluetoothPrinter
+
+    class Link:
+        def send(self, data, progress):
+            progress("connecting", 0)
+            progress("sending", 50)
+            progress("sending", 100)
+
+        def close(self):
+            pass
+
+    p = BluetoothPrinter("label", {"ble_address": "X", "width_mm": 40, "height_mm": 20}, str(tmp_path), link=Link())
+    p.print_image(Image.new("L", (320, 160), 255), "x", detail="Order #278A, label 2 of 3")
+    st = p.status.as_dict()
+    assert st["state"] == "done" and st["detail"] == "Order #278A, label 2 of 3" and st["at"]
+
+
+# ---------------------------------------------------------------- 7. error codes and log
+
+def test_errors_are_logged_with_codes(odoo_engine, tmp_path):
+    eng, fake = odoo_engine
+    eng.wait(eng.start_print_all())
+    log = (tmp_path / "data" / "packstation.log").read_text()
+    assert "WAYBILL-MISSING" in log
+    assert any(i["code"] == "WAYBILL-MISSING" for i in eng.log.recent())
+
+
+def test_odoo_unreachable_is_odoo_net(tmp_path):
+    def down(*a, **k):
+        raise PackError("ODOO-NET", "reading Odoo", "connection refused")
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=down)])
+    eng.scan()
+    assert eng.source_errors["odoo"]["code"] == "ODOO-NET"
+
+
+# ---------------------------------------------------------------- 8. multi-device
+
+def test_home_screen_app_qr_pin_and_restart(tmp_path, monkeypatch):
+    from packstation import web
+    eng = Engine(write_cfg(tmp_path), sources=[DemoSource()])
+    c = web.create_app(eng).test_client()
+    assert c.get("/manifest.webmanifest").get_json()["display"] == "standalone"
+    assert c.get("/icon-192.png").mimetype == "image/png"
+    assert c.get("/api/qr.png").mimetype == "image/png"
+    assert "addresses" in c.get("/api/state").get_json()
+
+    assert c.post("/api/settings", json={"pin": "12a"}).status_code == 400
+    assert c.post("/api/settings", json={"pin": "4321"}).get_json()["ok"]
+    remote = {"REMOTE_ADDR": "192.168.1.20"}
+    assert c.get("/api/state", environ_base=remote).status_code == 401
+    assert "PIN" in c.get("/", environ_base=remote).get_data(as_text=True)
+    assert c.post("/api/login", json={"pin": "0000"}, environ_base=remote).status_code == 403
+    r = c.post("/api/login", json={"pin": "4321"}, environ_base=remote)
+    assert r.status_code == 200
+    assert c.get("/api/state", environ_base=remote).status_code == 200      # cookie now set
+    assert c.get("/api/state").status_code == 200                             # the Mac itself never asks
+
+    called = []
+    monkeypatch.setattr(web.os, "execv", lambda *a: called.append(a))
+    assert c.post("/api/restart").get_json()["ok"]
+    time.sleep(1.2)
+    assert called and called[0][1][1:3] == ["-m", "packstation"]
+
+
+# ---------------------------------------------------------------- deploy: update from the UI, brand clean-up
+
+def test_install_update_zip_keeps_mac_files(tmp_path):
+    import zipfile
+    from packstation.updater import install_zip
+
+    root = tmp_path / "PackStation"
+    (root / "labels").mkdir(parents=True)
+    (root / "config.toml").write_text("SECRET")
+    (root / "labels" / "products.csv").write_text("sku,title,size,brand,icon\nMY-EDIT,Mine,3g,,\n")
+    (root / "requirements.txt").write_text("flask\n")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("atlasdsf-branch/packstation/__main__.py", "print('new')\n")
+        z.writestr("atlasdsf-branch/labels/products.csv", "sku,title,size,brand,icon\nSEED,Seed,3g,,\n")
+        z.writestr("atlasdsf-branch/config.toml", "OVERWRITE")
+        z.writestr("atlasdsf-branch/data/packstation.db", "OVERWRITE")
+        z.writestr("atlasdsf-branch/requirements.txt", "flask\n")
+    info = install_zip(buf.getvalue(), root=root, pip=False)
+    assert (root / "packstation" / "__main__.py").read_text() == "print('new')\n"
+    assert (root / "config.toml").read_text() == "SECRET"                       # kept
+    assert not (root / "data" / "packstation.db").exists()                      # data/ never touched
+    assert "MY-EDIT" in (root / "data" / "products.csv").read_text()            # edits moved to data/ first
+    assert info["files"] == 3 and not info["installed_packages"]
+    with pytest.raises(PackError):
+        install_zip(b"not a zip", root=root, pip=False)
+
+
+def test_update_only_from_the_mac_itself(tmp_path):
+    from packstation import web
+    eng = Engine(write_cfg(tmp_path), sources=[DemoSource()])
+    c = web.create_app(eng).test_client()
+    r = c.post("/api/update", environ_base={"REMOTE_ADDR": "192.168.1.20"})
+    assert r.status_code == 403
+
+
+def test_moleculelabs_brand_switched_to_atlas_origins_once(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "products.csv").write_text("sku,title,size,brand,icon\nA,Sandalwood,3g,moleculelabs,\nB,Rose,3g,other brand,\n")
+    cfg = write_cfg(tmp_path)
+    config_mod.set_values(cfg["_path"], "labels", {"brand": "moleculelabs"})
+    eng = Engine(config_mod.load(cfg["_path"]), sources=[DemoSource()])
+    rows = {r["sku"]: r["brand"] for r in eng.catalog.all_rows()}
+    assert rows == {"A": "atlas origins", "B": "other brand"}
+    assert eng.catalog.default_brand == "atlas origins"
+    assert tomllib.loads((tmp_path / "config.toml").read_text())["labels"]["brand"] == "atlas origins"
+
+
+def test_tracking_falls_back_to_connector_field():
+    fake = FakeOdoo()
+    p = fake.pickings[80]
+    p["carrier_tracking_ref"] = False
+    p["shopee_tracking_number"] = "SPXMY0999111Z"
+    for q in fake.pickings.values():
+        q.setdefault("shopee_tracking_number", False)
+    src = OdooSource({}, rpc=fake)
+    o = {x.order_id: x for x in src.list_orders()}["WH/OUT/00080"]
+    assert o.tracking == "SPXMY0999111Z" and o.match_code == "111Z"

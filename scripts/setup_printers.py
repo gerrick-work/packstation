@@ -77,18 +77,6 @@ def send(queue: str, job: bytes) -> None:
         raise SystemExit(f"Could not send the test to {queue}: {r.stderr.strip()}")
 
 
-def write_printer(text: str, section: str, values: dict) -> str:
-    """Replace one [printers.x] block in config.toml text, keeping everything else as is."""
-    lines = [f"[printers.{section}]"]
-    for k, v in values.items():
-        lines.append(f"{k} = " + (f'"{v}"' if isinstance(v, str) else str(v).lower() if isinstance(v, bool) else f"{v:g}"))
-    block = "\n".join(lines) + "\n"
-    pattern = re.compile(rf"^\[printers\.{section}\]\n(?:(?!^\[).*\n?)*", re.M)
-    if pattern.search(text):
-        return pattern.sub(block + "\n", text, count=1)
-    return text.rstrip("\n") + "\n\n" + block
-
-
 def usb_targets() -> list[tuple[str, callable, dict]]:
     say("1. Plug BOTH AiYin printers into this Mac with USB cables.")
     say("2. Switch both printers on and make sure each has its labels loaded.")
@@ -182,25 +170,25 @@ def main() -> None:
         say("\nYou picked the same printer twice. Run this again and choose carefully.")
         sys.exit(1)
 
-    size = "50x25"
+    size = "40x20"
     if "label" in roles:
-        size = input("\nWhat size are your SMALL product labels? Look on the roll's box, e.g. 50x25 (press Enter for 50x25): ").strip() or "50x25"
+        size = input("\nWhat size are your SMALL product labels? Look on the roll's box, e.g. 40x20 (press Enter for 40x20): ").strip() or "40x20"
         if not re.match(r"^\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*$", size):
-            say("That size wasn't understood, so 50x25 is used. You can change it later in config.toml.")
-            size = "50x25"
+            say("That size wasn't understood, so 40x20 is used. You can change it later in config.toml.")
+            size = "40x20"
 
-    text = CONFIG.read_text()
+    from packstation.config import set_values
+
     if "waybill" in roles:
         r = roles["waybill"]
-        text = write_printer(text, "waybill", {**{k: v for k, v in r.items() if k != "invert"},
-                                               "width_mm": 100, "height_mm": 150, "dpi": 203, "invert": r["invert"]})
+        set_values(CONFIG, "printers.waybill", {**{k: v for k, v in r.items() if k != "invert"},
+                                                "width_mm": 100, "height_mm": 150, "dpi": 203, "invert": r["invert"]})
     if "label" in roles:
         r = roles["label"]
         lw, lh = (float(x) for x in re.split(r"[x×*]", size.replace(" ", "")))
-        text = write_printer(text, "label", {**{k: v for k, v in r.items() if k != "invert"},
-                                             "width_mm": lw, "height_mm": lh, "dpi": 203,
-                                             "invert": r["invert"], "match_code": True})
-    CONFIG.write_text(text)
+        set_values(CONFIG, "printers.label", {**{k: v for k, v in r.items() if k != "invert"},
+                                              "width_mm": lw, "height_mm": lh, "dpi": 203,
+                                              "invert": r["invert"], "match_code": True})
 
     say("\n=== Done! Your printers are set up. ===")
     if mode == "b":

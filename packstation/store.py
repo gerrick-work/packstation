@@ -17,6 +17,7 @@ class Store:
             " key TEXT PRIMARY KEY, printed_at TEXT, tracking TEXT, labels INTEGER)"
         )
         self.db.execute("CREATE TABLE IF NOT EXISTS packed (key TEXT PRIMARY KEY, packed_at TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY, done_at TEXT)")
         self.db.commit()
 
     def _now(self) -> str:
@@ -25,6 +26,22 @@ class Store:
     def printed(self) -> dict[str, str]:
         with self.lock:
             return {k: t for k, t in self.db.execute("SELECT key, printed_at FROM printed")}
+
+    def printed_rows(self) -> dict[str, dict]:
+        with self.lock:
+            return {k: {"at": t, "tracking": tr, "labels": n}
+                    for k, t, tr, n in self.db.execute("SELECT key, printed_at, tracking, labels FROM printed")}
+
+    def run_once(self, name: str, fn) -> bool:
+        """Run a one-time data fix; returns True if it ran now."""
+        with self.lock:
+            if self.db.execute("SELECT 1 FROM migrations WHERE name = ?", (name,)).fetchone():
+                return False
+        fn()
+        with self.lock:
+            self.db.execute("INSERT INTO migrations VALUES (?, ?)", (name, self._now()))
+            self.db.commit()
+        return True
 
     def mark(self, key: str, tracking: str | None, labels: int) -> None:
         with self.lock:

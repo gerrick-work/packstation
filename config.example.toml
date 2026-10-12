@@ -1,58 +1,76 @@
-# Copy to config.toml (never committed) and fill in. Anything you leave disabled is skipped.
+# Copy to config.toml (never committed) and fill it in. Anything you leave disabled is skipped.
+# Most of these can be changed from the Settings and Printers screens instead.
 
 [app]
-# data_dir = "data"          # printed-order log, platform tokens and test-mode output
-only_due_today = false       # true: Print All skips orders whose ship-by date is after today
+# data_dir = "data"          # printed-order log, product list, packstation.log, platform tokens
+only_due_today = false       # true: Print all skips orders whose ship-by date is after today
+host = "0.0.0.0"             # 0.0.0.0 = phones and iPads on the same Wi-Fi can open it
+port = 8765
+pin = ""                     # 4 digits to require a PIN on other devices (the Mac itself never asks)
 
 # Made-up orders, for trying the app before the real accounts are connected.
 [demo]
 enabled = true
 
+# Odoo with the Odoo S.A. Shopee and TikTok connectors (sale_shopee, sale_tiktok).
+# Waybills are read from the connectors' fields; Refresh runs their sync jobs first.
+[odoo]
+enabled = false
+url = "https://atlas-dsf.odoo.com"
+db = "atlas-dsf"
+username = "packstation@example.com"   # needs Settings/Administrator rights for Refresh to run the sync jobs
+api_key = ""                            # Odoo: Preferences > Account Security > New API Key
+tiktok_ship_method = "dropoff"          # "dropoff" or "pickup" when Print all books a TikTok courier
+refresh_crons = [73, 77, 74]            # Shopee sync orders, TikTok sync orders, Shopee sync shipping labels
+note_when_printed = true                # post "printed" on the Odoo delivery (only when a waybill printed)
+platform_ref_field = "client_order_ref" # only used when Shopee/TikTok below are also enabled
+
+# Direct Shopee / TikTok APIs (only if NOT using the Odoo connectors above).
 [shopee]
 enabled = false
-partner_id = 0               # Shopee Open Platform app
+partner_id = 0
 partner_key = ""
 shop_id = 0
-access_token = ""            # first token from shop authorisation; refreshed automatically after that
+access_token = ""
 refresh_token = ""
 lookback_days = 14
-arrange = "off"              # "off" = arrange in Seller Centre yourself; "dropoff" or "pickup" = Print All arranges it
+arrange = "off"
 
 [tiktok]
 enabled = false
-app_key = ""                 # TikTok Shop Partner Center app
+app_key = ""
 app_secret = ""
 shop_cipher = ""
 access_token = ""
 refresh_token = ""
-arrange = "off"              # "off", "dropoff" or "pickup"
-
-[odoo]
-enabled = false
-url = "https://YOUR-DB.odoo.com"
-db = "YOUR-DB"
-username = "packstation@example.com"   # a dedicated user is best
-api_key = ""                            # Odoo: Preferences > Account Security > New API Key
-platform_ref_field = "client_order_ref" # sale order field holding the Shopee/TikTok order number
-note_when_printed = true                # post "printed" on the Odoo delivery
+arrange = "off"
 
 [labels]
-# catalog = "labels/products.csv"
-brand = "moleculelabs"
+brand = "atlas origins"      # used when a product's brand is empty
+# Fixed bottle-label layout in mm (defaults match the Label Expert design "Atlas Origin Finalv1"):
+# [labels.template]
+# title_y = 1.4
+# title_size = 4.2
 
-# backend: "file" (test, saves to data/output), "tspl" (direct to the AiYin, no driver), "cups" (macOS queue)
+# backend: "file" (test, saves to data/output), "bluetooth", "tspl" (USB), "cups" (macOS queue)
+# offsets/gap in mm are set on the Printers screen (calibration page + nudge buttons).
 [printers.waybill]
 backend = "file"
 width_mm = 100
 height_mm = 150
 dpi = 203
-# queue = "AiYin_Waybill"   # for tspl/cups: the macOS queue name (see README)
+gap_mm = 2
+offset_x_mm = 0
+offset_y_mm = 0
+# ble_address / ble_name: filled in by scripts/setup-printers-mac.command
 
 [printers.label]
 backend = "file"
-width_mm = 50
-height_mm = 25
+width_mm = 40
+height_mm = 20
 dpi = 203
-match_code = true           # print "#871A" (end of the tracking number) on each product label
-# queue = "AiYin_Labels"
-# font = "/System/Library/Fonts/Supplemental/Futura.ttc"
+gap_mm = 2
+offset_x_mm = 0
+offset_y_mm = 0
+separator = "blank"          # after each order: "blank" label, "divider" (dashed line) or "none"
+match_code = true            # print "#871A" (end of the tracking number) on each bottle label

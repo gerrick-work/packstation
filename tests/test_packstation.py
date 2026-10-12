@@ -147,10 +147,10 @@ def test_tspl_job_layout():
 def test_print_all_prints_each_order_once_in_matching_order(tmp_path):
     eng = Engine(make_cfg(tmp_path), sources=[DemoSource()])
     eng.scan()
-    results = eng.print_all()
+    results = eng.wait(eng.start_print_all()).results
     assert [r.ok for r in results] == [True, True, True]
     assert sum(r.labels for r in results) == 7
-    assert eng.print_all() == []        # nothing printed twice
+    assert eng.wait(eng.start_print_all()).results == []        # nothing printed twice
     waybills = sorted((tmp_path / "output").glob("*/waybill/*.pdf"))
     labels = sorted((tmp_path / "output").glob("*/label/*.png"))
     assert len(waybills) == 3 and len(labels) == 7
@@ -175,7 +175,7 @@ def test_failed_waybill_skips_labels_and_stays_pending(tmp_path):
 
     eng = Engine(make_cfg(tmp_path), sources=[Broken()])
     eng.scan()
-    results = eng.print_all()
+    results = eng.wait(eng.start_print_all()).results
     assert not any(r.ok for r in results)
     assert not list((tmp_path / "output").glob("*/label/*.png"))
     assert len(eng.pending()) == 3
@@ -191,17 +191,18 @@ def test_station_api(tmp_path):
 
     assert "Pack Station" in c.get("/").get_data(as_text=True)
     st = c.get("/api/state").get_json()
-    assert st["pending"] == {"orders": 3, "labels": 7}
+    assert len(st["plan"]["ready"]) == 3 and st["plan"]["labels"] == 7
     assert {o["state"] for o in st["orders"]} == {"ready"}
 
-    assert c.post("/api/print-all").get_json()["started"]
-    for _ in range(100):
+    assert c.post("/api/print-all", json={}).get_json()["ok"]
+    for _ in range(200):
         st = c.get("/api/state").get_json()
-        if not st["job"]["running"] and st["job"]["finished_at"]:
+        if st["jobs"][0]["state"] in ("done", "error"):
             break
-        time.sleep(0.05)
-    assert [r["ok"] for r in st["job"]["results"]] == [True, True, True]
-    assert st["pending"]["orders"] == 0
+        time.sleep(0.02)
+    assert [r["ok"] for r in st["jobs"][0]["results"]] == [True, True, True]
+    assert st["jobs"][0]["finished_at"]                      # persistent result with a timestamp
+    assert st["plan"]["ready"] == []
     assert {o["state"] for o in st["orders"]} == {"printed"}
 
     # pack check: find by tracking, by match code, then mark packed
@@ -213,16 +214,19 @@ def test_station_api(tmp_path):
     states = {o["order_id"]: o["state"] for o in c.get("/api/state").get_json()["orders"]}
     assert states["DEMO10002"] == "packed"
 
-    # label editor round trip
+    # label editor round trip; empty brand means the default brand
     rows = [{"sku": "ml-vanillin-10g", "title": "Vanillin", "size": "10g", "brand": "", "icon": "corrosive"}]
     assert c.put("/api/labels", json={"rows": rows}).get_json()["count"] == 1
     saved = c.get("/api/labels").get_json()
     assert saved["rows"][0]["sku"] == "ML-VANILLIN-10G" and "corrosive" in saved["icons"]
-    assert "ML-VANILLIN-10G,Vanillin,10g,moleculelabs,corrosive" in (tmp_path / "products.csv").read_text()
+    assert saved["rows"][0]["brand"] == "atlas origins"
     assert c.get("/api/label.png?title=Vanillin&size=10g").mimetype == "image/png"
     assert c.get("/api/preview/demo:DEMO10003").mimetype == "image/png"
 
-    # reprint and printer tests
-    assert c.post("/api/print/demo:DEMO10001").get_json()["ok"]
+    # reprint asks first, then prints; printer tests run as jobs
+    r = c.post("/api/print/demo:DEMO10001", json={})
+    assert r.status_code == 409 and r.get_json()["needs_confirm"] and r.get_json()["printed_at"]
+    job = c.post("/api/print/demo:DEMO10001", json={"force": True}).get_json()["job"]
+    assert job["keys"] == ["demo:DEMO10001"]
     assert c.post("/api/test/label", json={}).get_json()["ok"]
     assert c.post("/api/test/waybill").get_json()["ok"]
