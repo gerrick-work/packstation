@@ -76,19 +76,15 @@ Each printer in `config.toml` has a `backend`:
 - `tspl`: sends label commands straight to the printer over USB, with no driver and no Label Expert
 - `cups`: an ordinary macOS printer queue, if a working driver exists
 
-To set up `tspl`:
+To set up `tspl`, plug both printers in by USB, switch them on and run:
 
-1. Plug both printers in by USB and switch them on.
-2. Run `scripts/printer-check-mac.sh` and copy the `usb://...` address of each printer.
-3. Create a raw queue for each (macOS asks for your password):
-   ```
-   sudo lpadmin -p AiYin_Waybill -E -v "usb://...address of printer 1..." -m raw
-   sudo lpadmin -p AiYin_Labels  -E -v "usb://...address of printer 2..." -m raw
-   ```
-4. In `config.toml` set `backend = "tspl"` and `queue = "AiYin_Waybill"` (or `"AiYin_Labels"`),
-   plus the real label sizes in mm.
-5. Run `python -m packstation test-label`. If the label prints as a negative, set `invert = true`.
-   If it drifts across labels, adjust `gap_mm`.
+```
+bash scripts/setup-printers-mac.command
+```
+
+It finds the printers, connects them, prints a big test number on each, asks which printer is
+which (and whether the print came out the right way round), and saves the settings in
+`config.toml`. If a printer doesn't accept direct printing, it stops without changing anything.
 
 ### Tests
 
