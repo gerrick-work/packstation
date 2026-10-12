@@ -1,0 +1,58 @@
+# Copy to config.toml (never committed) and fill in. Anything you leave disabled is skipped.
+
+[app]
+# data_dir = "data"          # printed-order log, platform tokens and test-mode output
+only_due_today = false       # true: Print All skips orders whose ship-by date is after today
+
+# Made-up orders, for trying the app before the real accounts are connected.
+[demo]
+enabled = true
+
+[shopee]
+enabled = false
+partner_id = 0               # Shopee Open Platform app
+partner_key = ""
+shop_id = 0
+access_token = ""            # first token from shop authorisation; refreshed automatically after that
+refresh_token = ""
+lookback_days = 14
+arrange = "off"              # "off" = arrange in Seller Centre yourself; "dropoff" or "pickup" = Print All arranges it
+
+[tiktok]
+enabled = false
+app_key = ""                 # TikTok Shop Partner Center app
+app_secret = ""
+shop_cipher = ""
+access_token = ""
+refresh_token = ""
+arrange = "off"              # "off", "dropoff" or "pickup"
+
+[odoo]
+enabled = false
+url = "https://YOUR-DB.odoo.com"
+db = "YOUR-DB"
+username = "packstation@example.com"   # a dedicated user is best
+api_key = ""                            # Odoo: Preferences > Account Security > New API Key
+platform_ref_field = "client_order_ref" # sale order field holding the Shopee/TikTok order number
+note_when_printed = true                # post "printed" on the Odoo delivery
+
+[labels]
+# catalog = "labels/products.csv"
+brand = "moleculelabs"
+
+# backend: "file" (test, saves to data/output), "tspl" (direct to the AiYin, no driver), "cups" (macOS queue)
+[printers.waybill]
+backend = "file"
+width_mm = 100
+height_mm = 150
+dpi = 203
+# queue = "AiYin_Waybill"   # for tspl/cups: the macOS queue name (see README)
+
+[printers.label]
+backend = "file"
+width_mm = 50
+height_mm = 25
+dpi = 203
+match_code = true           # print "#871A" (end of the tracking number) on each product label
+# queue = "AiYin_Labels"
+# font = "/System/Library/Fonts/Supplemental/Futura.ttc"
