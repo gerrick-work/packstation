@@ -23,6 +23,17 @@ class Result:
     guessed_skus: list[str] = field(default_factory=list)
 
 
+@dataclass
+class Job:
+    """Progress of the current (or last) print run, for the screen to show."""
+    running: bool = False
+    total: int = 0
+    done: int = 0
+    current: str = ""
+    results: list[Result] = field(default_factory=list)
+    finished_at: datetime | None = None
+
+
 class Engine:
     def __init__(self, cfg: dict, sources: list[Source] | None = None):
         self.cfg = cfg
@@ -33,11 +44,12 @@ class Engine:
                                cfg.get("labels", {}).get("brand", "moleculelabs"))
         printers = cfg.get("printers", {})
         self.waybill_printer = build_printer("waybill", printers.get("waybill", {}), data_dir)
-        self.label_printer = build_printer("label", {"width_mm": 50, "height_mm": 25,
-                                                     **printers.get("label", {})}, data_dir)
+        self.label_cfg = {"width_mm": 50, "height_mm": 25, **printers.get("label", {})}
+        self.label_printer = build_printer("label", self.label_cfg, data_dir)
         self.orders: list[Order] = []
         self.source_errors: dict[str, str] = {}
         self.last_scan: datetime | None = None
+        self.job = Job()
         self.lock = threading.Lock()
 
     # ---- scanning ---------------------------------------------------------------
@@ -47,12 +59,13 @@ class Engine:
 
     def scan(self) -> list[Order]:
         found: list[Order] = []
-        self.source_errors = {}
+        errors = {}
         for s in self.sources:
             try:
                 found += s.list_orders()
             except Exception as e:  # one platform being down must not block the others
-                self.source_errors[s.name] = str(e)
+                errors[s.name] = str(e)
+        self.source_errors = errors
         self.orders = self._merge(found)
         self.last_scan = datetime.now()
         return self.orders
@@ -82,6 +95,17 @@ class Engine:
             todo = [o for o in todo if not o.ship_by or o.ship_by <= end]
         return todo
 
+    def find(self, code: str) -> Order | None:
+        """Look an order up by what a packer can scan or type: tracking number, order id or match code."""
+        c = code.strip().upper().lstrip("#")
+        if not c:
+            return None
+        for o in self.orders:
+            if c in ((o.tracking or "").upper(), o.order_id.upper()):
+                return o
+        hits = [o for o in self.orders if o.match_code == c]
+        return hits[0] if len(hits) == 1 else None
+
     # ---- printing ---------------------------------------------------------------
 
     def print_order(self, order: Order) -> Result:
@@ -92,7 +116,7 @@ class Engine:
                     order = src.arrange(order)
                 pdf = src.get_waybill(order)
                 self.waybill_printer.print_pdf(pdf, f"{order.source}-{order.order_id}-waybill")
-            labels = labels_for_order(order, self.catalog, self.cfg.get("printers", {}).get("label", {}))
+            labels = labels_for_order(order, self.catalog, self.label_cfg)
             for n, (img, item, _) in enumerate(labels, 1):
                 self.label_printer.print_image(img, f"{order.source}-{order.order_id}-{n:02d}")
         except Exception as e:
@@ -111,13 +135,40 @@ class Engine:
         return Result(order.key, True, f"{'waybill + ' if order.has_waybill else ''}{len(labels)} labels",
                       len(labels), guessed)
 
+    def _run(self, orders: list[Order]) -> list[Result]:
+        self.job = Job(running=True, total=len(orders))
+        try:
+            for o in orders:
+                self.job.current = o.key
+                self.job.results.append(self.print_order(o))
+                self.job.done += 1
+        finally:
+            self.job.running, self.job.current = False, ""
+            self.job.finished_at = datetime.now()
+        return self.job.results
+
     def print_all(self) -> list[Result]:
         with self.lock:
-            return [self.print_order(o) for o in self.pending()]
+            return self._run(self.pending())
+
+    def start_print_all(self) -> bool:
+        """Print everything pending in the background; returns False if a run is already going."""
+        if not self.lock.acquire(blocking=False):
+            return False
+
+        def work():
+            try:
+                self.scan()  # never print from a stale list
+                self._run(self.pending())
+            finally:
+                self.lock.release()
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
 
     def reprint(self, key: str) -> Result:
         with self.lock:
             order = next((o for o in self.orders if o.key == key), None)
             if not order:
                 return Result(key, False, "Order not in the current list; scan again")
-            return self.print_order(order)
+            return self._run([order])[0]

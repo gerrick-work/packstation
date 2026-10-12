@@ -62,6 +62,29 @@ class Catalog:
                             r.get("title", "").strip(), r.get("size", "").strip(),
                             (r.get("brand") or default_brand).strip(), (r.get("icon") or "").strip())
 
+    def all_rows(self) -> list[dict]:
+        return [{"sku": sku, **vars(d)} for sku, d in sorted(self.rows.items())]
+
+    def save(self, rows: list[dict]) -> None:
+        """Replace the product list (from the label editor) and write it back to the CSV."""
+        clean: dict[str, LabelData] = {}
+        for r in rows:
+            sku = str(r.get("sku", "")).strip().upper()
+            if not sku:
+                continue
+            clean[sku] = LabelData(str(r.get("title", "")).strip(), str(r.get("size", "")).strip(),
+                                   str(r.get("brand") or self.default_brand).strip(),
+                                   str(r.get("icon", "")).strip())
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["sku", "title", "size", "brand", "icon"])
+            for sku, d in sorted(clean.items()):
+                w.writerow([sku, d.title, d.size, d.brand, d.icon])
+        tmp.replace(self.path)
+        self.rows = clean
+
     def lookup(self, item: Item) -> tuple[LabelData, bool]:
         """Returns the label data and whether it came from the catalog (False = guessed from the name)."""
         hit = self.rows.get(item.sku.upper()) if item.sku else None
@@ -118,6 +141,10 @@ def render_product_label(data: LabelData, match_code: str | None, width_mm: floa
         d.text((code_right - tw, round(h * 0.76)), text, font=code_font, fill=0)
 
     return im.point(lambda v: 0 if v < 160 else 255).convert("1")
+
+
+def icon_names() -> list[str]:
+    return sorted(p.stem for p in (ROOT / "assets" / "icons").glob("*.png"))
 
 
 def labels_for_order(order: Order, catalog: Catalog, cfg: dict) -> list[tuple[Image.Image, Item, bool]]:

@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pack Station</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22%3E%3Crect width=%2224%22 height=%2224%22 rx=%226%22 fill=%22%232C463A%22/%3E%3Cpath d=%22M6 9l6-3 6 3-6 3zM6 9v7l6 3 6-3V9%22 fill=%22none%22 stroke=%22white%22 stroke-width=%221.6%22/%3E%3C/svg%3E">
+<style>
+:root{
+  --g0:#1F3429; --g:#2C463A; --g2:#4F7A60; --g3:#86AE94; --gt:#E8EFEA;
+  --ink:#111; --muted:#5f6b64; --line:#E3E7E4; --bg:#F3F5F3; --card:#fff;
+  --red:#B3261E; --redt:#FDECEA; --amber:#8A5A00; --ambert:#FFF3D6; --blue:#1D4E89; --bluet:#E6EEF8;
+  --r:18px;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font:16px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;color:var(--ink);background:var(--bg);
+  -webkit-user-select:none;user-select:none;overflow:hidden}
+input,select,textarea{-webkit-user-select:text;user-select:text}
+button{font:inherit;cursor:pointer;border:0;border-radius:14px;touch-action:manipulation}
+.app{display:grid;grid-template-columns:96px 1fr;grid-template-rows:64px 1fr;height:100vh}
+
+/* top bar */
+.top{grid-column:1/3;display:flex;align-items:center;gap:14px;padding:0 20px;background:linear-gradient(100deg,var(--g0),var(--g) 55%,var(--g2));color:#fff}
+.brand{font-weight:700;font-size:20px;letter-spacing:.3px;margin-right:10px;white-space:nowrap}
+.chips{display:flex;gap:8px;flex-wrap:wrap;flex:1;min-width:0;overflow:hidden;height:30px}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:99px;background:rgba(255,255,255,.14);font-size:13px;white-space:nowrap}
+.chip .dot{width:8px;height:8px;border-radius:50%;background:#7CF0A6}
+.chip.bad .dot{background:#FF8A80} .chip.test .dot{background:#FFD166}
+.clock{font-variant-numeric:tabular-nums;font-size:15px;opacity:.9;white-space:nowrap}
+.top .scanbtn{background:rgba(255,255,255,.16);color:#fff;padding:10px 16px;font-weight:600;white-space:nowrap}
+.top .scanbtn:active{background:rgba(255,255,255,.3)}
+
+/* nav rail */
+.rail{background:#fff;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:6px;padding:12px 8px}
+.rail button{background:transparent;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 4px;font-size:12px;font-weight:600}
+.rail button svg{width:28px;height:28px}
+.rail button.on{background:var(--gt);color:var(--g)}
+.rail .badge{position:absolute;margin:-6px 0 0 30px;background:var(--red);color:#fff;border-radius:99px;font-size:11px;padding:1px 6px}
+
+main{overflow:hidden;position:relative}
+.view{position:absolute;inset:0;display:none}
+.view.on{display:grid}
+
+/* orders view: grid + register */
+#v-orders{grid-template-columns:1fr 400px}
+.orders{overflow:auto;padding:20px 20px 40px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+.stat{background:var(--card);border-radius:var(--r);padding:14px 16px;border:1px solid var(--line);text-align:left;color:inherit}
+.stat b{display:block;font-size:34px;font-weight:300;line-height:1.1;color:var(--g)}
+.stat span{font-size:13px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.stat.on{outline:3px solid var(--g2)}
+.stat.warn b{color:var(--amber)}
+.filters{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.filters button{background:#fff;border:1px solid var(--line);padding:9px 16px;border-radius:99px;font-weight:600;color:var(--muted);font-size:14px}
+.filters button.on{background:var(--g);color:#fff;border-color:var(--g)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.card{background:var(--card);border-radius:var(--r);border:1px solid var(--line);padding:14px 16px;text-align:left;color:inherit;display:flex;flex-direction:column;gap:8px;min-height:170px;position:relative}
+.card:active{transform:scale(.99)}
+.card.sel{outline:3px solid var(--g2);border-color:transparent}
+.card .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.code{font:700 30px/1 ui-monospace,"SF Mono",Menlo,monospace;color:var(--g);letter-spacing:.5px}
+.src{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:3px 9px;border-radius:99px}
+.src.shopee{background:#FDEBE6;color:#B3401E}.src.tiktok{background:#E9E9EF;color:#222}
+.src.odoo{background:#F1E8F3;color:#714B67}.src.demo{background:var(--bluet);color:var(--blue)}
+.items{font-size:15px;color:#222;flex:1}
+.items div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.items .q{font-weight:700;color:var(--g);display:inline-block;min-width:28px}
+.meta{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:var(--muted)}
+.due.late{color:var(--red);font-weight:700}.due.today{color:var(--amber);font-weight:700}
+.state{font-size:12px;font-weight:700;padding:4px 10px;border-radius:99px}
+.state.ready{background:var(--gt);color:var(--g)}
+.state.arrange{background:var(--ambert);color:var(--amber)}
+.state.printed{background:var(--bluet);color:var(--blue)}
+.state.packed{background:#E6F4EA;color:#1E6B3A}
+.card.dim{opacity:.6}
+.empty{padding:60px 20px;text-align:center;color:var(--muted);font-size:18px}
+.alert{background:var(--redt);color:var(--red);border-radius:14px;padding:12px 16px;margin-bottom:12px;font-size:14px}
+
+/* register (right column) */
+.register{background:#fff;border-left:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
+.reg-top{padding:18px}
+.printall{width:100%;padding:22px 16px;font-size:24px;font-weight:700;color:#fff;border-radius:20px;
+  background:linear-gradient(135deg,var(--g0) 0%,var(--g) 45%,var(--g2) 100%);box-shadow:0 14px 30px rgba(44,70,58,.3)}
+.printall small{display:block;font-size:15px;font-weight:500;opacity:.85;margin-top:4px}
+.printall:active{transform:scale(.99)}
+.printall:disabled{background:#C9D1CC;box-shadow:none;cursor:default}
+.progress{margin-top:14px;display:none}
+.progress.on{display:block}
+.bar{height:14px;border-radius:99px;background:var(--gt);overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--g),var(--g2));transition:width .3s}
+.progress p{margin:8px 0 0;font-size:14px;color:var(--muted)}
+.reg-body{flex:1;overflow:auto;padding:0 18px 18px}
+.reg-body h3{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:16px 0 8px}
+.detail .code{font-size:44px}
+.detail .ids{font-size:13px;color:var(--muted);margin:6px 0 12px;word-break:break-all}
+.detail ul{list-style:none;margin:0;padding:0}
+.detail li{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);font-size:16px}
+.detail li .q{font-weight:700;color:var(--g);font-size:18px}
+.flag{font-size:11px;font-weight:700;color:var(--amber);background:var(--ambert);border-radius:99px;padding:2px 8px;margin-left:6px;white-space:nowrap}
+.preview{width:100%;border-radius:12px;border:1px solid var(--line);background:#f1f2f1;margin-top:12px}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.btn{padding:15px 12px;font-weight:700;font-size:16px;background:var(--gt);color:var(--g)}
+.btn.solid{background:var(--g);color:#fff}
+.btn.ghost{background:#fff;border:1px solid var(--line);color:var(--ink)}
+.btn:active{filter:brightness(.95)}
+.log div{display:flex;gap:8px;font-size:14px;padding:6px 0;border-bottom:1px solid var(--line)}
+.log .ok{color:#1E6B3A;font-weight:700}.log .no{color:var(--red);font-weight:700}
+.hint{color:var(--muted);font-size:14px;padding:20px 4px;text-align:center}
+
+/* pack check */
+#v-pack{place-items:start center;overflow:auto;padding:30px 20px}
+.packwrap{width:min(900px,100%)}
+.scanbox{display:flex;gap:10px}
+.scanbox input{flex:1;font-size:26px;padding:18px 20px;border-radius:18px;border:2px solid var(--line);outline:none;font-family:ui-monospace,Menlo,monospace}
+.scanbox input:focus{border-color:var(--g2)}
+.packcard{margin-top:20px;background:#fff;border-radius:24px;border:1px solid var(--line);padding:24px;display:none}
+.packcard.on{display:block}
+.packcard.flash-ok{animation:fok .8s}.packcard.flash-bad{animation:fbad .8s}
+@keyframes fok{0%{box-shadow:0 0 0 8px #7CF0A6}100%{box-shadow:none}}
+@keyframes fbad{0%{box-shadow:0 0 0 8px #FF8A80}100%{box-shadow:none}}
+.packhead{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+.packhead .code{font-size:64px}
+.units{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;margin:20px 0}
+.unit{background:var(--bg);border:2px solid var(--line);border-radius:18px;padding:18px;text-align:left;font-size:20px;font-weight:600;color:inherit;display:flex;gap:12px;align-items:center}
+.unit .tick{width:34px;height:34px;border-radius:50%;border:3px solid var(--g3);flex:none;display:grid;place-items:center;color:#fff;font-size:20px}
+.unit.done{background:#E6F4EA;border-color:#9AD3AE}
+.unit.done .tick{background:#1E6B3A;border-color:#1E6B3A}
+.packbtn{width:100%;padding:24px;font-size:24px;font-weight:700;border-radius:20px;background:#C9D1CC;color:#fff}
+.packbtn.ready{background:linear-gradient(135deg,var(--g0),var(--g) 45%,var(--g2))}
+.notfound{margin-top:20px;background:var(--redt);color:var(--red);border-radius:18px;padding:20px;font-size:20px;font-weight:600;display:none}
+.notfound.on{display:block}
+
+/* labels */
+#v-labels{grid-template-rows:auto 1fr;overflow:hidden}
+.tbar{display:flex;gap:10px;align-items:center;padding:16px 20px;background:#fff;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.tbar input{font-size:16px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);min-width:220px;flex:1;max-width:360px}
+.tbar .spacer{flex:1}
+.tbar .dirty{color:var(--amber);font-weight:600;font-size:14px}
+.ltable{overflow:auto;padding:16px 20px 60px}
+table{width:100%;border-collapse:separate;border-spacing:0 8px}
+th{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);text-align:left;padding:0 8px}
+td{background:#fff;padding:8px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);vertical-align:middle}
+td:first-child{border-left:1px solid var(--line);border-radius:14px 0 0 14px}
+td:last-child{border-right:1px solid var(--line);border-radius:0 14px 14px 0}
+td input,td select{width:100%;font-size:15px;padding:10px;border-radius:10px;border:1px solid var(--line);background:#fff}
+td input:focus,td select:focus{outline:2px solid var(--g2);border-color:transparent}
+td img{height:56px;border-radius:6px;border:1px solid var(--line);display:block}
+.iconbtn{background:var(--bg);padding:10px 12px;font-size:14px;font-weight:600;color:var(--muted);white-space:nowrap}
+
+/* printers */
+#v-printers{overflow:auto;padding:24px 20px;align-content:start;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+.pcard{background:#fff;border-radius:22px;border:1px solid var(--line);padding:22px}
+.pcard h2{margin:0 0 4px;font-size:22px;color:var(--g)}
+.pcard dl{display:grid;grid-template-columns:110px 1fr;gap:8px 12px;margin:16px 0;font-size:15px}
+.pcard dt{color:var(--muted)}.pcard dd{margin:0;font-weight:600}
+.pcard .msg{font-size:14px;color:var(--muted);margin-top:12px;word-break:break-all;min-height:20px}
+.help{grid-column:1/-1;background:var(--gt);border-radius:22px;padding:18px 22px;font-size:15px;color:var(--g)}
+.help code{background:#fff;padding:2px 6px;border-radius:6px}
+
+/* toast + confirm */
+.toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(120px);background:#111;color:#fff;padding:14px 22px;border-radius:14px;font-weight:600;transition:transform .25s;z-index:20;max-width:80vw}
+.toast.on{transform:translateX(-50%) translateY(0)}
+.toast.bad{background:var(--red)}
+.modal{position:fixed;inset:0;background:rgba(20,30,25,.45);display:none;place-items:center;z-index:30}
+.modal.on{display:grid}
+.modal .box{background:#fff;border-radius:24px;padding:28px;width:min(460px,92vw)}
+.modal h2{margin:0 0 8px;color:var(--g)}
+.modal p{color:var(--muted);margin:0 0 20px}
+
+@media (max-width:1100px){#v-orders{grid-template-columns:1fr 340px}.stats{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:820px){
+  .app{grid-template-columns:1fr;grid-template-rows:56px 1fr 72px}
+  .rail{grid-row:3;flex-direction:row;justify-content:space-around;border-right:0;border-top:1px solid var(--line);padding:6px}
+  .rail button{flex:1;padding:6px}
+  .top{grid-column:1}.chips{display:none}
+  #v-orders.on{display:flex;flex-direction:column;overflow:auto}
+  .orders{overflow:visible;padding-top:0}
+  .register{order:-1;border-left:0;overflow:visible;flex:none}
+  .reg-body{overflow:visible}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">Pack Station</div>
+    <div class="chips" id="chips"></div>
+    <div class="clock" id="clock"></div>
+    <button class="scanbtn" id="scanBtn">↻ Refresh orders</button>
+  </header>
+
+  <nav class="rail">
+    <button data-view="orders" class="on" title="Orders">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 7v10l9 4 9-4V7"/><path d="M12 11v10"/></svg>
+      Orders<span class="badge" id="navBadge" hidden></span></button>
+    <button data-view="pack" title="Pack check">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 5v14M7 5v14M11 5v14M15 5v14M19 5v14"/></svg>
+      Pack check</button>
+    <button data-view="labels" title="Product labels">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12l-8 8-9-9V3h8l9 9z"/><circle cx="7.5" cy="7.5" r="1.5"/></svg>
+      Labels</button>
+    <button data-view="printers" title="Printers">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M6 14h12v7H6z"/></svg>
+      Printers</button>
+  </nav>
+
+  <main>
+    <!-- ORDERS -->
+    <section class="view on" id="v-orders">
+      <div class="orders">
+        <div id="alerts"></div>
+        <div class="stats">
+          <button class="stat" data-filter="ready"><b id="sReady">0</b><span>To print</span></button>
+          <button class="stat warn" data-filter="arrange"><b id="sArrange">0</b><span>Needs arranging</span></button>
+          <button class="stat" data-filter="printed"><b id="sPrinted">0</b><span>Printed, to pack</span></button>
+          <button class="stat" data-filter="packed"><b id="sPacked">0</b><span>Packed</span></button>
+        </div>
+        <div class="filters" id="filters">
+          <button data-filter="all" class="on">All</button>
+          <button data-filter="ready">To print</button>
+          <button data-filter="arrange">Needs arranging</button>
+          <button data-filter="printed">Printed</button>
+          <button data-filter="packed">Packed</button>
+          <span style="width:12px"></span>
+          <span id="srcFilters" style="display:contents"></span>
+        </div>
+        <div class="grid" id="grid"></div>
+      </div>
+
+      <aside class="register">
+        <div class="reg-top">
+          <button class="printall" id="printAll">Print all<small id="printAllSub">…</small></button>
+          <div class="progress" id="progress">
+            <div class="bar"><i id="barFill"></i></div>
+            <p id="progressText"></p>
+          </div>
+        </div>
+        <div class="reg-body" id="regBody"></div>
+      </aside>
+    </section>
+
+    <!-- PACK CHECK -->
+    <section class="view" id="v-pack">
+      <div class="packwrap">
+        <div class="scanbox">
+          <input id="scanInput" placeholder="Scan waybill, or type order no. / #code" autocomplete="off" spellcheck="false">
+          <button class="btn solid" id="scanGo" style="padding:0 28px;font-size:20px">Find</button>
+        </div>
+        <div class="notfound" id="notFound"></div>
+        <div class="packcard" id="packCard"></div>
+      </div>
+    </section>
+
+    <!-- LABELS -->
+    <section class="view" id="v-labels">
+      <div class="tbar">
+        <input id="labelSearch" placeholder="Search products…">
+        <button class="btn ghost" id="addLabel">+ Add product</button>
+        <span class="spacer"></span>
+        <span class="dirty" id="dirty" hidden>Unsaved changes</span>
+        <button class="btn solid" id="saveLabels">Save label list</button>
+      </div>
+      <div class="ltable">
+        <table>
+          <thead><tr><th style="width:18%">SKU</th><th>Title</th><th style="width:9%">Size</th><th style="width:14%">Brand</th>
+            <th style="width:13%">Icon</th><th style="width:130px">Preview</th><th style="width:150px"></th></tr></thead>
+          <tbody id="labelRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- PRINTERS -->
+    <section class="view" id="v-printers"></section>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="modal" id="modal"><div class="box">
+  <h2 id="mTitle"></h2><p id="mText"></p>
+  <div class="actions"><button class="btn ghost" id="mNo">Cancel</button><button class="btn solid" id="mYes">Yes</button></div>
+</div></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const api = async (path, opts = {}) => {
+  const r = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
+  return r.json();
+};
+
+let S = null, filter = "all", srcFilter = null, selected = null, pollTimer = null;
+
+/* ---------- feedback ---------- */
+function toast(msg, bad) {
+  const t = $("#toast"); t.textContent = msg; t.className = "toast on" + (bad ? " bad" : "");
+  clearTimeout(t._h); t._h = setTimeout(() => t.className = "toast", 2600);
+}
+let audio;
+function beep(ok) {
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.frequency.value = ok ? 880 : 220; o.type = ok ? "sine" : "square";
+    g.gain.value = .12; o.connect(g); g.connect(audio.destination);
+    o.start(); o.stop(audio.currentTime + (ok ? .12 : .35));
+  } catch (e) {}
+}
+function confirmBox(title, text, yes = "Yes") {
+  return new Promise(res => {
+    $("#mTitle").textContent = title; $("#mText").textContent = text; $("#mYes").textContent = yes;
+    $("#modal").classList.add("on");
+    const done = v => { $("#modal").classList.remove("on"); res(v); };
+    $("#mYes").onclick = () => done(true); $("#mNo").onclick = () => done(false);
+  });
+}
+
+/* ---------- nav ---------- */
+document.querySelectorAll(".rail button").forEach(b => b.onclick = () => show(b.dataset.view));
+function show(view) {
+  document.querySelectorAll(".rail button").forEach(b => b.classList.toggle("on", b.dataset.view === view));
+  document.querySelectorAll(".view").forEach(v => v.classList.toggle("on", v.id === "v-" + view));
+  if (view === "pack") setTimeout(() => $("#scanInput").focus(), 50);
+  if (view === "labels") loadLabels();
+  if (view === "printers") renderPrinters();
+}
+
+/* ---------- clock ---------- */
+setInterval(() => $("#clock").textContent = new Date().toLocaleString([], {weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"}), 1000);
+
+/* ---------- state ---------- */
+async function refresh() {
+  try { S = await api("/api/state"); } catch (e) { toast("Pack Station is not responding", true); return; }
+  render();
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(refresh, S.job.running ? 800 : 20000);
+}
+
+function dueInfo(iso) {
+  if (!iso) return {text: "No ship-by date", cls: ""};
+  const d = new Date(iso), now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const text = (sameDay ? "Today " : d.toLocaleDateString([], {weekday:"short", day:"numeric", month:"short"}) + " ")
+             + d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  return {text, cls: d < now ? "late" : sameDay ? "today" : ""};
+}
+const STATE_TEXT = {ready: "To print", arrange: "Needs arranging", printed: "Printed", packed: "Packed"};
+
+function render() {
+  // chips
+  const chips = S.sources.map(s => `<span class="chip ${s.error ? "bad" : s.name === "demo" ? "test" : ""}" title="${esc(s.error || "connected")}"><span class="dot"></span>${esc(s.name)}</span>`);
+  for (const [n, p] of Object.entries(S.printers))
+    chips.push(`<span class="chip ${p.backend === "file" ? "test" : ""}" title="${esc(p.backend)}"><span class="dot"></span>${n} printer${p.backend === "file" ? " (test)" : ""}</span>`);
+  $("#chips").innerHTML = chips.join("");
+
+  // alerts
+  $("#alerts").innerHTML = S.sources.filter(s => s.error)
+    .map(s => `<div class="alert"><b>${esc(s.name)}</b> could not be read: ${esc(s.error)}</div>`).join("");
+
+  // stats
+  const count = st => S.orders.filter(o => o.state === st).length;
+  $("#sReady").textContent = count("ready"); $("#sArrange").textContent = count("arrange");
+  $("#sPrinted").textContent = count("printed"); $("#sPacked").textContent = count("packed");
+  const badge = $("#navBadge"); badge.hidden = !S.pending.orders; badge.textContent = S.pending.orders;
+  document.querySelectorAll(".stat").forEach(b => b.classList.toggle("on", b.dataset.filter === filter));
+  document.querySelectorAll("#filters [data-filter]").forEach(b => b.classList.toggle("on", b.dataset.filter === filter));
+
+  // source filters
+  const srcs = [...new Set(S.orders.map(o => o.source))];
+  $("#srcFilters").innerHTML = srcs.length > 1 ? srcs.map(s =>
+    `<button data-src="${esc(s)}" class="${srcFilter === s ? "on" : ""}">${esc(s)}</button>`).join("") : "";
+  document.querySelectorAll("#srcFilters button").forEach(b => b.onclick = () => {
+    srcFilter = srcFilter === b.dataset.src ? null : b.dataset.src; render(); });
+
+  // cards
+  const list = S.orders.filter(o => (filter === "all" || o.state === filter) && (!srcFilter || o.source === srcFilter));
+  $("#grid").innerHTML = list.length ? list.map(card).join("")
+    : `<div class="empty">${S.orders.length ? "Nothing here." : "No orders to pack. 🎉"}</div>`;
+  document.querySelectorAll(".card").forEach(c => c.onclick = () => { selected = c.dataset.key; render(); });
+
+  // print all button
+  const pa = $("#printAll"), job = S.job;
+  pa.disabled = job.running || !S.pending.orders;
+  pa.firstChild.textContent = job.running ? "Printing…" : S.pending.orders ? "Print all" : "All printed";
+  $("#printAllSub").textContent = job.running ? `${job.done} of ${job.total} orders`
+    : `${S.pending.orders} orders · ${S.pending.labels} labels`;
+  $("#progress").classList.toggle("on", job.running);
+  $("#barFill").style.width = job.total ? (100 * job.done / job.total) + "%" : "0";
+  $("#progressText").textContent = job.running ? `Now: ${job.current}` : "";
+  if (S._wasRunning && !job.running) {
+    const bad = job.results.filter(r => !r.ok).length;
+    toast(bad ? `Done with ${bad} problem${bad > 1 ? "s" : ""}, see the list` : `Printed ${job.results.length} orders`, bad);
+    beep(!bad);
+  }
+  S._wasRunning = job.running;
+  renderRegister();
+}
+
+function card(o) {
+  const due = dueInfo(o.ship_by);
+  const items = o.items.slice(0, 3).map(i => `<div><span class="q">${i.qty}×</span>${esc(i.name)}</div>`).join("")
+    + (o.items.length > 3 ? `<div style="color:var(--muted)">+${o.items.length - 3} more</div>` : "");
+  return `<button class="card ${o.key === selected ? "sel" : ""} ${o.state === "packed" ? "dim" : ""}" data-key="${esc(o.key)}">
+    <div class="row"><span class="code">#${esc(o.match)}</span><span class="src ${esc(o.source)}">${esc(o.source)}</span></div>
+    <div class="items">${items}</div>
+    <div class="meta"><span class="due ${due.cls}">${esc(due.text)}</span><span class="state ${o.state}">${STATE_TEXT[o.state]}</span></div>
+  </button>`;
+}
+
+function renderRegister() {
+  const o = S.orders.find(x => x.key === selected);
+  const results = S.job.results;
+  let html = "";
+  if (o) {
+    const unknown = o.items.filter(i => !i.known).length;
+    html += `<div class="detail">
+      <h3>Selected order</h3>
+      <div class="row" style="display:flex;justify-content:space-between;align-items:center">
+        <span class="code">#${esc(o.match)}</span><span class="state ${o.state}">${STATE_TEXT[o.state]}</span></div>
+      <div class="ids"><span class="src ${esc(o.source)}">${esc(o.source)}</span> ${esc(o.order_id)}${o.tracking ? " · " + esc(o.tracking) : ""}</div>
+      <ul>${o.items.map(i => `<li><span>${esc(i.name)}${i.known ? "" : '<span class="flag">not in label list</span>'}</span><span class="q">×${i.qty}</span></li>`).join("")}</ul>
+      <img class="preview" src="/api/preview/${encodeURIComponent(o.key)}?t=${Date.now() >> 14}" alt="label preview">
+      ${o.state === "arrange" ? `<p class="hint" style="padding:10px 0;text-align:left">Arrange this shipment in ${esc(o.source)} Seller Centre first (or turn on auto-arrange in config), then refresh.</p>` : ""}
+      ${unknown ? `<p class="hint" style="padding:10px 0;text-align:left">${unknown} product${unknown > 1 ? "s" : ""} not in the label list: the label is guessed from the product name. Add ${unknown > 1 ? "them" : "it"} under Labels.</p>` : ""}
+      <div class="actions">
+        <button class="btn solid" id="printOne">${o.printed_at ? "Reprint" : "Print"}</button>
+        <button class="btn" id="packOne">${o.state === "packed" ? "Undo packed" : "Mark packed"}</button>
+      </div></div>`;
+  } else {
+    html += `<p class="hint">Tap an order to see its items and label, print it on its own, or mark it packed.</p>`;
+  }
+  if (results.length) {
+    html += `<h3>Last print run${S.job.finished_at ? " · " + new Date(S.job.finished_at).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : ""}</h3><div class="log">`
+      + results.map(r => `<div><span class="${r.ok ? "ok" : "no"}">${r.ok ? "✓" : "✕"}</span><span><b>${esc(r.key.split(":")[1])}</b> ${esc(r.message)}${r.guessed.length ? ` <span class="flag">guessed: ${esc(r.guessed.join(", "))}</span>` : ""}</span></div>`).join("")
+      + `</div>`;
+  }
+  $("#regBody").innerHTML = html;
+  if (o) {
+    $("#printOne").onclick = async () => {
+      if (o.printed_at && !await confirmBox("Reprint this order?", `Waybill and ${o.units} label${o.units > 1 ? "s" : ""} for #${o.match} will print again.`, "Reprint")) return;
+      const r = await api(`/api/print/${encodeURIComponent(o.key)}`, {method: "POST"});
+      toast(r.ok ? `#${o.match}: ${r.message}` : r.message, !r.ok); beep(r.ok); refresh();
+    };
+    $("#packOne").onclick = async () => {
+      await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed: o.state !== "packed"})});
+      refresh();
+    };
+  }
+}
+
+$("#printAll").onclick = async () => {
+  const ok = await confirmBox("Print all?", `${S.pending.orders} waybills and ${S.pending.labels} product labels will print, order by order.`, "Print all");
+  if (!ok) return;
+  const r = await api("/api/print-all", {method: "POST"});
+  if (!r.started) toast("A print run is already going", true);
+  S._wasRunning = true; refresh();
+};
+$("#scanBtn").onclick = async () => { await api("/api/scan", {method: "POST"}); toast("Orders refreshed"); refresh(); };
+document.querySelectorAll("[data-filter]").forEach(b => b.onclick = () => { filter = filter === b.dataset.filter && b.classList.contains("stat") ? "all" : b.dataset.filter; render(); });
+
+/* ---------- pack check ---------- */
+let packing = null, ticks = [];
+async function lookup() {
+  const code = $("#scanInput").value.trim();
+  if (!code) return;
+  const r = await api("/api/find?code=" + encodeURIComponent(code));
+  $("#scanInput").value = "";
+  if (!r.found) {
+    packing = null; $("#packCard").classList.remove("on");
+    $("#notFound").textContent = `No order matches “${code}”. Check the waybill, or refresh orders.`;
+    $("#notFound").classList.add("on"); beep(false); return;
+  }
+  $("#notFound").classList.remove("on");
+  packing = r.order;
+  ticks = packing.items.flatMap(i => Array.from({length: i.qty}, () => ({name: i.name, done: false})));
+  renderPack(true);
+  beep(true);
+}
+function renderPack(flash) {
+  const o = packing, c = $("#packCard");
+  const all = ticks.every(t => t.done);
+  c.innerHTML = `<div class="packhead"><div><span class="code">#${esc(o.match)}</span>
+      <div class="ids" style="color:var(--muted)"><span class="src ${esc(o.source)}">${esc(o.source)}</span> ${esc(o.order_id)}${o.tracking ? " · " + esc(o.tracking) : ""}</div></div>
+      <span class="state ${o.state}" style="font-size:16px;padding:8px 16px">${STATE_TEXT[o.state]}</span></div>
+    <p style="font-size:18px;margin:16px 0 0;color:var(--muted)">Tap each item as it goes into the parcel. Every label must show <b style="color:var(--g)">#${esc(o.match)}</b>.</p>
+    <div class="units">${ticks.map((t, i) => `<button class="unit ${t.done ? "done" : ""}" data-i="${i}"><span class="tick">${t.done ? "✓" : ""}</span>${esc(t.name)}</button>`).join("")}</div>
+    <button class="packbtn ${all ? "ready" : ""}" id="packDone">${o.state === "packed" ? "Already packed ✓" : all ? "Packed ✓  Next parcel" : `${ticks.filter(t => t.done).length} of ${ticks.length} items in`}</button>`;
+  c.classList.add("on");
+  if (flash) { c.classList.remove("flash-ok"); void c.offsetWidth; c.classList.add("flash-ok"); }
+  c.querySelectorAll(".unit").forEach(b => b.onclick = () => { ticks[b.dataset.i].done = !ticks[b.dataset.i].done; renderPack(); });
+  $("#packDone").onclick = async () => {
+    if (!ticks.every(t => t.done) && o.state !== "packed") { beep(false); toast("Tick every item first", true); return; }
+    await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed: true})});
+    toast(`#${o.match} packed`); beep(true);
+    packing = null; c.classList.remove("on"); $("#scanInput").focus(); refresh();
+  };
+}
+$("#scanInput").addEventListener("keydown", e => { if (e.key === "Enter") lookup(); });
+$("#scanGo").onclick = lookup;
+
+/* ---------- labels ---------- */
+let L = {rows: [], icons: []}, dirty = false;
+async function loadLabels() {
+  if (dirty) return;
+  L = await api("/api/labels");
+  drawLabels();
+}
+function previewUrl(r) {
+  const q = new URLSearchParams({title: r.title || "", size: r.size || "", brand: r.brand || "", icon: r.icon || ""});
+  return "/api/label.png?" + q;
+}
+function drawLabels() {
+  const q = ($("#labelSearch").value || "").toLowerCase();
+  $("#labelRows").innerHTML = L.rows.map((r, i) => ({r, i}))
+    .filter(({r}) => !q || (r.sku + " " + r.title).toLowerCase().includes(q))
+    .map(({r, i}) => `<tr data-i="${i}">
+      <td><input data-f="sku" value="${esc(r.sku)}" placeholder="SKU"></td>
+      <td><input data-f="title" value="${esc(r.title)}" placeholder="Product name"></td>
+      <td><input data-f="size" value="${esc(r.size)}" placeholder="3g"></td>
+      <td><input data-f="brand" value="${esc(r.brand)}" placeholder="${esc(L.brand)}"></td>
+      <td><select data-f="icon"><option value="">None</option>${L.icons.map(n => `<option ${n === r.icon ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></td>
+      <td><img src="${previewUrl(r)}" alt=""></td>
+      <td><button class="iconbtn" data-act="test">Test print</button> <button class="iconbtn" data-act="del">✕</button></td>
+    </tr>`).join("") || `<tr><td colspan="7" class="hint">No products yet. Add one.</td></tr>`;
+  document.querySelectorAll("#labelRows tr[data-i]").forEach(tr => {
+    const i = +tr.dataset.i;
+    tr.querySelectorAll("[data-f]").forEach(inp => {
+      const ev = inp.tagName === "SELECT" ? "change" : "input";
+      inp.addEventListener(ev, () => {
+        L.rows[i][inp.dataset.f] = inp.value; setDirty(true);
+        clearTimeout(tr._t); tr._t = setTimeout(() => tr.querySelector("img").src = previewUrl(L.rows[i]), 250);
+      });
+    });
+    tr.querySelector("[data-act=del]").onclick = async () => {
+      if (!await confirmBox("Remove product?", `${L.rows[i].sku || "This row"} will be removed from the label list.`, "Remove")) return;
+      L.rows.splice(i, 1); setDirty(true); drawLabels();
+    };
+    tr.querySelector("[data-act=test]").onclick = async () => {
+      const r = await api("/api/test/label", {method: "POST", body: JSON.stringify(L.rows[i])});
+      toast(r.ok ? "Test label sent" : r.message, !r.ok);
+    };
+  });
+}
+function setDirty(v) { dirty = v; $("#dirty").hidden = !v; }
+$("#labelSearch").addEventListener("input", drawLabels);
+$("#addLabel").onclick = () => {
+  L.rows.unshift({sku: "", title: "", size: "", brand: L.brand, icon: ""});
+  $("#labelSearch").value = ""; setDirty(true); drawLabels();
+  document.querySelector("#labelRows input")?.focus();
+};
+$("#saveLabels").onclick = async () => {
+  const skus = L.rows.map(r => (r.sku || "").trim().toUpperCase()).filter(Boolean);
+  if (new Set(skus).size !== skus.length) { toast("Two products have the same SKU", true); return; }
+  if (L.rows.some(r => !(r.sku || "").trim())) {
+    if (!await confirmBox("Some rows have no SKU", "Rows without a SKU will be dropped.", "Save anyway")) return;
+  }
+  const r = await api("/api/labels", {method: "PUT", body: JSON.stringify({rows: L.rows})});
+  setDirty(false); toast(`Saved ${r.count} products`); loadLabels(); refresh();
+};
+window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+/* ---------- printers ---------- */
+function renderPrinters() {
+  if (!S) return;
+  const p = S.printers;
+  const mode = b => ({file: "Test mode: saves files to data/output", tspl: "Direct to printer (TSPL over USB)", cups: "macOS printer queue"}[b] || b);
+  $("#v-printers").innerHTML = ["waybill", "label"].map(n => `<div class="pcard">
+      <h2>${n === "waybill" ? "Waybill printer" : "Product label printer"}</h2>
+      <dl><dt>Mode</dt><dd>${esc(mode(p[n].backend))}</dd><dt>Label size</dt><dd>${esc(p[n].size)}</dd>
+      <dt>Queue</dt><dd>${esc(p[n].queue || "-")}</dd></dl>
+      <button class="btn solid" data-test="${n}" style="width:100%">Print a test ${n}</button>
+      <div class="msg" id="msg-${n}"></div></div>`).join("")
+    + `<div class="help">Printer settings live in <code>config.toml</code> on this Mac. To print for real, set each printer's
+       <code>backend</code> to <code>"tspl"</code> and its <code>queue</code> name (see the README), then restart Pack Station.</div>`;
+  document.querySelectorAll("[data-test]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    const r = await api("/api/test/" + b.dataset.test, {method: "POST"});
+    $("#msg-" + b.dataset.test).textContent = r.message; toast(r.ok ? "Test sent" : "Test failed", !r.ok);
+    b.disabled = false;
+  });
+}
+
+refresh();
+</script>
+</body>
+</html>

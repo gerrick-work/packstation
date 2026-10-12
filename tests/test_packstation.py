@@ -181,14 +181,48 @@ def test_failed_waybill_skips_labels_and_stays_pending(tmp_path):
     assert len(eng.pending()) == 3
 
 
-def test_web_page_and_print_button(tmp_path):
+def test_station_api(tmp_path):
+    import time
     from packstation.web import create_app
 
     eng = Engine(make_cfg(tmp_path), sources=[DemoSource()])
-    client = create_app(eng).test_client()
-    page = client.get("/").get_data(as_text=True)
-    assert "Print all · 3 orders · 7 labels" in page
-    client.post("/print-all")
-    page = client.get("/").get_data(as_text=True)
-    assert "Print all · 0 orders" in page and "Printed" in page
-    assert client.get("/preview/demo:DEMO10002").mimetype == "image/png"
+    eng.catalog.path = tmp_path / "products.csv"
+    c = create_app(eng).test_client()
+
+    assert "Pack Station" in c.get("/").get_data(as_text=True)
+    st = c.get("/api/state").get_json()
+    assert st["pending"] == {"orders": 3, "labels": 7}
+    assert {o["state"] for o in st["orders"]} == {"ready"}
+
+    assert c.post("/api/print-all").get_json()["started"]
+    for _ in range(100):
+        st = c.get("/api/state").get_json()
+        if not st["job"]["running"] and st["job"]["finished_at"]:
+            break
+        time.sleep(0.05)
+    assert [r["ok"] for r in st["job"]["results"]] == [True, True, True]
+    assert st["pending"]["orders"] == 0
+    assert {o["state"] for o in st["orders"]} == {"printed"}
+
+    # pack check: find by tracking, by match code, then mark packed
+    found = c.get("/api/find?code=spxmy0000000202b").get_json()
+    assert found["found"] and found["order"]["order_id"] == "DEMO10002"
+    assert c.get("/api/find?code=%23101A").get_json()["order"]["order_id"] == "DEMO10001"
+    assert not c.get("/api/find?code=NOPE").get_json()["found"]
+    c.post("/api/packed/demo:DEMO10002", json={"packed": True})
+    states = {o["order_id"]: o["state"] for o in c.get("/api/state").get_json()["orders"]}
+    assert states["DEMO10002"] == "packed"
+
+    # label editor round trip
+    rows = [{"sku": "ml-vanillin-10g", "title": "Vanillin", "size": "10g", "brand": "", "icon": "corrosive"}]
+    assert c.put("/api/labels", json={"rows": rows}).get_json()["count"] == 1
+    saved = c.get("/api/labels").get_json()
+    assert saved["rows"][0]["sku"] == "ML-VANILLIN-10G" and "corrosive" in saved["icons"]
+    assert "ML-VANILLIN-10G,Vanillin,10g,moleculelabs,corrosive" in (tmp_path / "products.csv").read_text()
+    assert c.get("/api/label.png?title=Vanillin&size=10g").mimetype == "image/png"
+    assert c.get("/api/preview/demo:DEMO10003").mimetype == "image/png"
+
+    # reprint and printer tests
+    assert c.post("/api/print/demo:DEMO10001").get_json()["ok"]
+    assert c.post("/api/test/label", json={}).get_json()["ok"]
+    assert c.post("/api/test/waybill").get_json()["ok"]

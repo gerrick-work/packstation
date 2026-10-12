@@ -1,134 +1,173 @@
-"""The one-button page, served on http://localhost:8765 on the packing Mac."""
+"""The Pack Station screen (packstation/static/index.html) and the small JSON API behind it.
+Served on http://localhost:8765 on the packing Mac."""
 from __future__ import annotations
 
 import io
 from datetime import datetime, timedelta
 
-from flask import Flask, redirect, render_template_string, send_file, url_for
+from flask import Flask, jsonify, request, send_file
+from PIL import Image
 
-from .engine import Engine
-from .labels import labels_for_order
+from .engine import Engine, Result
+from .labels import LabelData, icon_names, labels_for_order, render_product_label
+from .models import Order
 
-PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pack Station</title>
-<style>
- :root{--g:#2C463A;--g2:#4F7A60;--bad:#B3261E;--muted:#667;--line:#e4e7e5}
- body{font:15px/1.45 -apple-system,system-ui,sans-serif;margin:0;background:#f6f7f6;color:#111}
- main{max-width:1100px;margin:0 auto;padding:24px 16px}
- h1{margin:0 0 4px;font-size:24px;color:var(--g)} .muted{color:var(--muted)}
- .bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:18px 0}
- button{font:inherit;border:0;border-radius:12px;padding:12px 18px;cursor:pointer;background:#fff;border:1px solid var(--line)}
- .big{font-size:22px;font-weight:600;padding:20px 34px;color:#fff;border:0;
-      background:linear-gradient(135deg,#1F3429,#2C463A 45%,#4F7A60)}
- .big:disabled{background:#c9cfcb;cursor:default}
- table{width:100%;border-collapse:collapse;background:#fff;border-radius:14px;overflow:hidden}
- th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
- th{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
- .code{font:600 18px ui-monospace,Menlo,monospace;color:var(--g)}
- .pill{display:inline-block;border-radius:99px;padding:2px 10px;font-size:12px;background:#eef2ef;color:var(--g)}
- .warn{background:#fdecea;color:var(--bad)} .done{opacity:.55}
- .box{background:#fff;border-radius:14px;padding:12px 16px;margin:12px 0;border-left:4px solid var(--g)}
- .box.err{border-color:var(--bad)} form{display:inline}
-</style></head><body><main>
-<h1>Pack Station</h1>
-<div class="muted">Last scan {{ last_scan or "never" }} · sources: {{ sources|join(", ") or "none enabled" }}</div>
 
-{% for name, err in source_errors.items() %}
- <div class="box err"><b>{{ name }}</b> could not be read: {{ err }}</div>
-{% endfor %}
-{% if results %}
- <div class="box"><b>Last print run</b><br>
- {% for r in results %}{{ "✔" if r.ok else "✖" }} {{ r.key }}: {{ r.message }}
-   {% if r.guessed_skus %}<span class="pill warn">not in label list: {{ r.guessed_skus|join(", ") }}</span>{% endif %}<br>{% endfor %}
- </div>
-{% endif %}
+def _png(img: Image.Image):
+    buf = io.BytesIO()
+    img.convert("L").save(buf, "PNG")
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png", max_age=0)
 
-<div class="bar">
- <form method="post" action="{{ url_for('print_all') }}"
-       onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').innerText='Printing…'">
-  <button class="big" {% if not pending %}disabled{% endif %}>
-   Print all · {{ pending|length }} orders · {{ pending_labels }} labels</button>
- </form>
- <form method="post" action="{{ url_for('scan') }}"><button>Scan for new orders</button></form>
-</div>
 
-<table>
- <tr><th>Ship by</th><th>Order</th><th>Match</th><th>Items</th><th>Status</th><th></th></tr>
- {% for o in orders %}
- {% set when = printed.get(o.key) %}
- <tr class="{{ 'done' if when }}">
-  <td>{{ o.ship_by.strftime("%a %d %b %H:%M") if o.ship_by else "-" }}</td>
-  <td><span class="pill">{{ o.source }}</span> {{ o.order_id }}<br><span class="muted">{{ o.tracking or "" }}</span></td>
-  <td class="code">#{{ o.match_code }}</td>
-  <td>{% for i in o.items %}{{ i.qty }} × {{ i.name }}<br>{% endfor %}</td>
-  <td>{% if when %}Printed {{ when[11:16] }}
-      {% elif o.needs_arrange %}<span class="pill warn">needs arranging</span>
-      {% elif not o.has_waybill %}labels only{% else %}ready{% endif %}</td>
-  <td><a href="{{ url_for('preview', key=o.key) }}" target="_blank">label</a>
-   <form method="post" action="{{ url_for('reprint', key=o.key) }}"><button>{{ "Reprint" if when else "Print" }}</button></form></td>
- </tr>
- {% else %}<tr><td colspan="6" class="muted">Nothing to pack.</td></tr>{% endfor %}
-</table>
-</main></body></html>"""
+def _result(r: Result) -> dict:
+    return {"key": r.key, "ok": r.ok, "message": r.message, "labels": r.labels, "guessed": r.guessed_skus}
 
 
 def create_app(engine: Engine) -> Flask:
-    app = Flask(__name__)
-    state = {"results": []}
+    app = Flask(__name__, static_folder="static", static_url_path="/static")
 
-    def ensure_fresh():
-        if not engine.last_scan or datetime.now() - engine.last_scan > timedelta(minutes=2):
-            engine.scan()
+    def order_json(o: Order, printed: dict, packed: dict) -> dict:
+        if o.key in packed:
+            state = "packed"
+        elif o.key in printed:
+            state = "printed"
+        elif o.needs_arrange:
+            state = "arrange"
+        else:
+            state = "ready"
+        return {
+            "key": o.key, "source": o.source, "order_id": o.order_id, "tracking": o.tracking,
+            "match": o.match_code, "status": o.status, "state": state,
+            "ship_by": o.ship_by.isoformat() if o.ship_by else None,
+            "items": [{"sku": i.sku, "name": i.name, "qty": i.qty,
+                       "known": engine.catalog.lookup(i)[1]} for i in o.items],
+            "units": o.unit_count, "has_waybill": o.has_waybill,
+            "printed_at": printed.get(o.key), "packed_at": packed.get(o.key),
+        }
 
     @app.get("/")
     def index():
-        ensure_fresh()
+        return app.send_static_file("index.html")
+
+    @app.get("/api/state")
+    def state():
+        if not engine.job.running and (not engine.last_scan
+                                       or datetime.now() - engine.last_scan > timedelta(minutes=2)):
+            engine.scan()
+        printed, packed = engine.store.printed(), engine.store.packed()
         pending = engine.pending()
-        return render_template_string(
-            PAGE, orders=engine.orders, pending=pending, pending_labels=sum(o.unit_count for o in pending),
-            printed=engine.store.printed(), results=state["results"], source_errors=engine.source_errors,
-            sources=[s.name for s in engine.sources],
-            last_scan=engine.last_scan.strftime("%H:%M:%S") if engine.last_scan else None)
+        job = engine.job
+        return jsonify({
+            "orders": [order_json(o, printed, packed) for o in engine.orders],
+            "pending": {"orders": len(pending), "labels": sum(o.unit_count for o in pending)},
+            "sources": [{"name": s.name, "error": engine.source_errors.get(s.name)} for s in engine.sources],
+            "printers": {
+                name: {"backend": p.cfg.get("backend", "file"), "queue": p.cfg.get("queue"),
+                       "size": f"{p.width_mm:g} × {p.height_mm:g} mm"}
+                for name, p in (("waybill", engine.waybill_printer), ("label", engine.label_printer))
+            },
+            "last_scan": engine.last_scan.isoformat() if engine.last_scan else None,
+            "job": {"running": job.running, "total": job.total, "done": job.done, "current": job.current,
+                    "results": [_result(r) for r in job.results],
+                    "finished_at": job.finished_at.isoformat() if job.finished_at else None},
+        })
 
-    @app.post("/scan")
+    @app.post("/api/scan")
     def scan():
-        engine.scan()
-        return redirect(url_for("index"))
+        if not engine.job.running:
+            engine.scan()
+        return jsonify(ok=True)
 
-    @app.post("/print-all")
+    @app.post("/api/print-all")
     def print_all():
-        engine.scan()  # never print from a stale list
-        state["results"] = engine.print_all()
-        return redirect(url_for("index"))
+        return jsonify(started=engine.start_print_all())
 
-    @app.post("/reprint/<path:key>")
-    def reprint(key):
+    @app.post("/api/print/<path:key>")
+    def print_one(key):
+        if engine.job.running:
+            return jsonify(_result(Result(key, False, "A print run is in progress"))), 409
         engine.store.unmark(key)
-        state["results"] = [engine.reprint(key)]
-        return redirect(url_for("index"))
+        return jsonify(_result(engine.reprint(key)))
 
-    @app.get("/preview/<path:key>")
+    @app.post("/api/packed/<path:key>")
+    def packed(key):
+        engine.store.mark_packed(key, bool((request.get_json(silent=True) or {}).get("packed", True)))
+        return jsonify(ok=True)
+
+    @app.get("/api/find")
+    def find():
+        o = engine.find(request.args.get("code", ""))
+        if not o:
+            return jsonify(found=False)
+        return jsonify(found=True, order=order_json(o, engine.store.printed(), engine.store.packed()))
+
+    @app.get("/api/preview/<path:key>")
     def preview(key):
         order = next((o for o in engine.orders if o.key == key), None)
         if not order or not order.items:
             return "No such order", 404
-        labels = labels_for_order(order, engine.catalog, engine.cfg.get("printers", {}).get("label", {}))
-        # Stack this order's distinct labels vertically for a quick look.
         seen, imgs = set(), []
-        for img, item, _ in labels:
-            if item.sku not in seen:
-                seen.add(item.sku)
+        for img, item, _ in labels_for_order(order, engine.catalog, engine.label_cfg):
+            if (item.sku, item.name) not in seen:
+                seen.add((item.sku, item.name))
                 imgs.append(img.convert("L"))
-        from PIL import Image
-        sheet = Image.new("L", (max(i.width for i in imgs) + 20, sum(i.height + 20 for i in imgs) + 20), 200)
-        y = 20
+        gap = 16
+        sheet = Image.new("L", (max(i.width for i in imgs), sum(i.height for i in imgs) + gap * (len(imgs) - 1)), 235)
+        y = 0
         for i in imgs:
-            sheet.paste(i, (10, y))
-            y += i.height + 20
-        buf = io.BytesIO()
-        sheet.save(buf, "PNG")
-        buf.seek(0)
-        return send_file(buf, mimetype="image/png")
+            sheet.paste(i, (0, y))
+            y += i.height + gap
+        return _png(sheet)
+
+    # ---- label library ----------------------------------------------------------
+
+    @app.get("/api/labels")
+    def labels():
+        return jsonify(rows=engine.catalog.all_rows(), icons=icon_names(), brand=engine.catalog.default_brand)
+
+    @app.put("/api/labels")
+    def save_labels():
+        rows = (request.get_json(silent=True) or {}).get("rows", [])
+        engine.catalog.save(rows)
+        return jsonify(ok=True, count=len(engine.catalog.rows))
+
+    def _label_from_args() -> LabelData:
+        a = request.args
+        return LabelData(a.get("title", "") or "Product", a.get("size", ""),
+                         a.get("brand", "") or engine.catalog.default_brand, a.get("icon", ""))
+
+    @app.get("/api/label.png")
+    def label_png():
+        c = engine.label_cfg
+        img = render_product_label(_label_from_args(), request.args.get("code") or None,
+                                   float(c["width_mm"]), float(c["height_mm"]), int(c.get("dpi", 203)),
+                                   c.get("font"))
+        return _png(img)
+
+    # ---- printer tests ----------------------------------------------------------
+
+    @app.post("/api/test/label")
+    def test_label():
+        c = engine.label_cfg
+        body = request.get_json(silent=True) or {}
+        data = LabelData(body.get("title") or "Sandalwood", body.get("size", "3g"),
+                         body.get("brand") or engine.catalog.default_brand, body.get("icon", "corrosive"))
+        try:
+            img = render_product_label(data, "TEST", float(c["width_mm"]), float(c["height_mm"]),
+                                       int(c.get("dpi", 203)), c.get("font"))
+            return jsonify(ok=True, message=f"Sent to label printer: {engine.label_printer.print_image(img, 'test-label')}")
+        except Exception as e:
+            return jsonify(ok=False, message=str(e)), 500
+
+    @app.post("/api/test/waybill")
+    def test_waybill():
+        from .sources.demo import DemoSource
+        try:
+            demo = DemoSource()
+            pdf = demo.get_waybill(demo.list_orders()[0])
+            return jsonify(ok=True, message=f"Sent to waybill printer: {engine.waybill_printer.print_pdf(pdf, 'test-waybill')}")
+        except Exception as e:
+            return jsonify(ok=False, message=str(e)), 500
 
     return app

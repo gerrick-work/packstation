@@ -2,16 +2,25 @@
 
 ## Pack Station: one-click waybills and product labels
 
-A small app for the packing Mac. It scans Shopee, TikTok Shop and Odoo for orders that are ready
-to pack. One click on **Print all** then goes through them in ship-by order:
+A touch-friendly station for the packing Mac (it also works on an iPad or phone on the same
+Wi-Fi). It scans Shopee, TikTok Shop and Odoo for orders that are ready to pack, and does
+everything from one screen:
 
-1. the order's **waybill** (fetched from Shopee or TikTok) on the waybill printer
-2. that order's **product labels** (one per unit) on the label printer
+- **Orders:** every order as a card with its match code, items, ship-by time (amber = today,
+  red = late) and status. Tap the tiles to filter: To print, Needs arranging, Printed, Packed.
+  **Print all** prints every pending order with a progress bar: for each order, its **waybill**
+  on the waybill printer, then its **product labels** (one per unit) on the label printer, in
+  the same order. Tap a card to preview its labels, print or reprint it, or mark it packed.
+- **Pack check:** scan the waybill (any USB barcode scanner works), or type the order number or
+  `#code`. The order's items show as big tiles; tap each one as it goes in. The order is only
+  marked packed once every item is ticked, with a beep for right and wrong.
+- **Labels:** the product label list, editable on screen with a live preview of each label,
+  plus a test print per product.
+- **Printers:** what each printer is set to, with test-print buttons.
 
-Because both printers run order by order, the two stacks come out in the same order. Every product
-label also carries a **match code**: the last 4 characters of the tracking number, which is
-printed on the waybill too (for example `#871A`). Orders are remembered once printed, so Print all
-never prints anything twice; use **Reprint** on a row when you need a copy.
+Every product label carries a **match code**: the last 4 characters of the tracking number,
+which is printed on the waybill too (for example `#871A`). Orders are remembered once printed,
+so Print all never prints anything twice.
 
 ![Pack Station](docs/screenshot.png)
 
@@ -19,7 +28,7 @@ never prints anything twice; use **Reprint** on a row when you need a copy.
 
 Double-click `scripts/start-mac.command`. The first run installs what it needs (Python 3 comes
 with macOS developer tools; run `xcode-select --install` once if it's missing). Then it opens
-http://localhost:8765. It starts in **demo mode**: made-up orders, and "printing" just saves
+http://localhost:8765. Use the browser's full-screen mode for a kiosk feel. It starts in **demo mode**: made-up orders, and "printing" just saves
 files into `data/output/`, so you can try it safely.
 
 Terminal alternatives: `python -m packstation scan` lists what it finds;
