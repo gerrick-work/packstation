@@ -1,8 +1,8 @@
 """Guided printer setup for the Pack Station (macOS). Run it with:  bash scripts/setup-printers-mac.command
 
-It finds the AiYin printers on USB, connects each one as a direct (raw) macOS printer, prints a big
-test number on each so you can tell them apart, asks which is which, and saves the answers in
-config.toml. Nothing is changed in config.toml until every test has printed correctly.
+It finds the AiYin printers over Bluetooth or USB, prints a big test number on each so you can tell
+them apart, asks which is which, and saves the answers in config.toml. Nothing is changed in
+config.toml until every test has printed correctly.
 """
 from __future__ import annotations
 
@@ -89,73 +89,122 @@ def write_printer(text: str, section: str, values: dict) -> str:
     return text.rstrip("\n") + "\n\n" + block
 
 
-def main() -> None:
-    if not CONFIG.exists():
-        (ROOT / "config.toml").write_text((ROOT / "config.example.toml").read_text())
-
-    say("\n=== Pack Station printer setup ===")
+def usb_targets() -> list[tuple[str, callable, dict]]:
     say("1. Plug BOTH AiYin printers into this Mac with USB cables.")
     say("2. Switch both printers on and make sure each has its labels loaded.")
     input("\nPress Enter when both are on... ")
-
     uris = usb_printers()
     if not uris:
         say("\nThe Mac can't see any USB printer.")
         say("Check the cables (try another USB port or adapter), switch the printers off and on, then run this again.")
         sys.exit(1)
-    say(f"\nFound {len(uris)} USB printer(s).")
     if len(uris) > 2:
         say("More than 2 USB printers are connected. Unplug any other printers and run this again.")
         sys.exit(1)
-
+    say(f"\nFound {len(uris)} USB printer(s).")
     say("\nConnecting them now. If the Mac asks for a Password, type your Mac login password and press Enter")
     say("(nothing shows on screen while you type, that is normal).")
-    queues = [connect(i + 1, u) for i, u in enumerate(uris)]
+    out = []
+    for i, uri in enumerate(uris, 1):
+        q = connect(i, uri)
+        out.append((f"USB printer {i}", lambda job, q=q: send(q, job), {"backend": "tspl", "queue": q}))
+    return out
+
+
+def bluetooth_targets() -> list[tuple[str, callable, dict]]:
+    import asyncio
+
+    from packstation.bluetooth import BleLink, scan
+
+    say("1. Switch BOTH AiYin printers on, with their labels loaded.")
+    say("2. On your phone, CLOSE the Label Expert app (or turn the phone's Bluetooth off).")
+    say("   A printer can only talk to one device at a time.")
+    say("3. If the Mac asks 'Terminal would like to use Bluetooth', click Allow.")
+    input("\nPress Enter when ready... ")
+    say("\nSearching for Bluetooth printers (about 10 seconds)...")
+    found = asyncio.run(scan(10))[:12]
+    if not found:
+        say("\nNo Bluetooth devices found. Check Bluetooth is on (top-right menu bar), the printers are on")
+        say("and not connected to the phone, then run this again.")
+        sys.exit(1)
+    for n, (addr, name, rssi) in enumerate(found, 1):
+        say(f"   {n}. {name}")
+    picks: list[int] = []
+    while len(picks) < 2:
+        a = input(f"\nType the number of {'a' if not picks else 'the other'} printer"
+                  f"{'' if not picks else ' (or just press Enter if you only have one)'}: ").strip()
+        if not a and picks:
+            break
+        if a.isdigit() and 1 <= int(a) <= len(found) and int(a) - 1 not in picks:
+            picks.append(int(a) - 1)
+        else:
+            say("   Please type one of the numbers in the list.")
+    out = []
+    for i in picks:
+        addr, name, _ = found[i]
+        link = BleLink(addr)
+        out.append((name, link.send, {"backend": "bluetooth", "ble_address": addr, "ble_name": name}))
+    return out
+
+
+def main() -> None:
+    if not CONFIG.exists():
+        (ROOT / "config.toml").write_text((ROOT / "config.example.toml").read_text())
+
+    say("\n=== Pack Station printer setup ===")
+    mode = ask("How are the printers connected to this Mac?", {"b": "Bluetooth", "u": "USB cable"})
+    say("")
+    targets = bluetooth_targets() if mode == "b" else usb_targets()
 
     roles: dict[str, dict] = {}
-    for i, q in enumerate(queues, 1):
-        say(f"\nPrinting a test card with a big number {i} ...")
-        send(q, number_card(str(i), 50, 25))
-        printed = ask(f"Did a label with the number {i} come out of one of the printers?",
-                      {"y": "yes", "n": "no"})
-        if printed == "n":
+    for i, (name, send_job, conf) in enumerate(targets, 1):
+        say(f"\nPrinting a test card with a big number {i} on {name} ...")
+        try:
+            send_job(number_card(str(i), 50, 25))
+        except Exception as e:
+            say(f"\nCould not send to {name}: {e}")
+            say("Nothing has been changed in your settings. Send Claude a screenshot of this window.")
+            sys.exit(1)
+        if ask(f"Did a label with the number {i} come out of one of the printers?", {"y": "yes", "n": "no"}) == "n":
             say("\nThis printer did not accept direct printing. Nothing has been changed in your settings.")
             say("Take a photo of the printer's model sticker and send it, plus a screenshot of this window, to Claude.")
             sys.exit(1)
         invert = ask("Was it a BLACK number on a WHITE label?", {"y": "yes", "n": "no, it was white on black"}) == "n"
         if invert:
-            send(q, number_card(str(i), 50, 25, invert=True))
+            send_job(number_card(str(i), 50, 25, invert=True))
             if ask("A second one printed. Is THAT one black on white?", {"y": "yes", "n": "no"}) == "n":
                 say("\nThe colours are still wrong. Nothing has been changed. Send Claude a photo of both labels.")
                 sys.exit(1)
         role = ask(f"Which printer printed number {i}?", {"w": "the BIG waybill printer", "s": "the SMALL product label printer"})
-        roles["waybill" if role == "w" else "label"] = {"queue": q, "invert": invert}
+        roles["waybill" if role == "w" else "label"] = dict(conf, invert=invert)
 
-    if len(queues) == 2 and len(roles) != 2:
+    if len(targets) == 2 and len(roles) != 2:
         say("\nYou picked the same printer twice. Run this again and choose carefully.")
         sys.exit(1)
 
     size = "50x25"
     if "label" in roles:
         size = input("\nWhat size are your SMALL product labels? Look on the roll's box, e.g. 50x25 (press Enter for 50x25): ").strip() or "50x25"
-        m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*$", size)
-        if not m:
+        if not re.match(r"^\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*$", size):
             say("That size wasn't understood, so 50x25 is used. You can change it later in config.toml.")
             size = "50x25"
 
     text = CONFIG.read_text()
     if "waybill" in roles:
-        text = write_printer(text, "waybill", {"backend": "tspl", "queue": roles["waybill"]["queue"],
-                                               "width_mm": 100, "height_mm": 150, "dpi": 203,
-                                               "invert": roles["waybill"]["invert"]})
+        r = roles["waybill"]
+        text = write_printer(text, "waybill", {**{k: v for k, v in r.items() if k != "invert"},
+                                               "width_mm": 100, "height_mm": 150, "dpi": 203, "invert": r["invert"]})
     if "label" in roles:
+        r = roles["label"]
         lw, lh = (float(x) for x in re.split(r"[x×*]", size.replace(" ", "")))
-        text = write_printer(text, "label", {"backend": "tspl", "queue": roles["label"]["queue"],
+        text = write_printer(text, "label", {**{k: v for k, v in r.items() if k != "invert"},
                                              "width_mm": lw, "height_mm": lh, "dpi": 203,
-                                             "invert": roles["label"]["invert"], "match_code": True})
+                                             "invert": r["invert"], "match_code": True})
     CONFIG.write_text(text)
 
     say("\n=== Done! Your printers are set up. ===")
+    if mode == "b":
+        say("Over Bluetooth a big waybill takes a while to send (around 15 to 25 seconds). That's normal.")
     say("Next: start Pack Station again (bash scripts/start-mac.command), click 'Printers' on the left,")
     say("and press 'Print a test label' and 'Print a test waybill'. Then press Print all to print the 3 test orders.")
 

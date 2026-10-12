@@ -563,7 +563,7 @@ window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); 
 function renderPrinters() {
   if (!S) return;
   const p = S.printers;
-  const mode = b => ({file: "Test mode: saves files to data/output", tspl: "Direct to printer (TSPL over USB)", cups: "macOS printer queue"}[b] || b);
+  const mode = b => ({file: "Test mode: saves files to data/output", tspl: "Direct to printer (USB)", bluetooth: "Bluetooth", cups: "macOS printer queue"}[b] || b);
   $("#v-printers").innerHTML = ["waybill", "label"].map(n => `<div class="pcard">
       <h2>${n === "waybill" ? "Waybill printer" : "Product label printer"}</h2>
       <dl><dt>Mode</dt><dd>${esc(mode(p[n].backend))}</dd><dt>Label size</dt><dd>${esc(p[n].size)}</dd>

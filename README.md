@@ -74,9 +74,11 @@ Each printer in `config.toml` has a `backend`:
 
 - `file`: test mode, saves to `data/output/` (default)
 - `tspl`: sends label commands straight to the printer over USB, with no driver and no Label Expert
+- `bluetooth`: the same, over Bluetooth (no pairing needed). Slower: a big waybill takes around
+  15 to 25 seconds. Close Label Expert on your phone first; a printer talks to one device at a time
 - `cups`: an ordinary macOS printer queue, if a working driver exists
 
-To set up `tspl`, plug both printers in by USB, switch them on and run:
+To set up the printers (Bluetooth or USB), switch them on and run:
 
 ```
 bash scripts/setup-printers-mac.command

@@ -134,7 +134,24 @@ class TsplPrinter(Printer):
         return out.stdout.strip()
 
 
-BACKENDS = {"file": FilePrinter, "cups": CupsPrinter, "tspl": TsplPrinter}
+class BluetoothPrinter(Printer):
+    """TSPL over Bluetooth Low Energy (config: ble_address from the setup helper)."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        from .bluetooth import BleLink
+
+        self.link = BleLink(self.cfg["ble_address"], self.cfg.get("ble_char"),
+                            int(self.cfg.get("ble_chunk", 180)), float(self.cfg.get("ble_delay_ms", 20)))
+
+    def print_image(self, img: Image.Image, label: str) -> str:
+        job = tspl_job(fit_to_label(img, *self.dots), self.width_mm, self.height_mm,
+                       float(self.cfg.get("gap_mm", 2)), bool(self.cfg.get("invert", False)))
+        self.link.send(job)
+        return f"bluetooth {self.cfg.get('ble_name') or self.cfg['ble_address']}"
+
+
+BACKENDS = {"file": FilePrinter, "cups": CupsPrinter, "tspl": TsplPrinter, "bluetooth": BluetoothPrinter}
 
 
 def build_printer(name: str, cfg: dict, data_dir: str) -> Printer:
