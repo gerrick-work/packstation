@@ -1,0 +1,28 @@
+{
+  "type": "proforma",
+  "number": "PF/2026/1099",
+  "date": "12/10/2026",
+  "due_date": "12/10/2026",
+  "source": "Jane Tan: corporate gifting 400 x 5ml",
+  "bill_to": {
+    "name": "Example Client Sdn Bhd",
+    "attn": "Jane Tan",
+    "tel": "0123456789",
+    "email": "jane@example.com"
+  },
+  "lines": [
+    {
+      "description": "Corporate gifting: 400 x 5ml fragrance (Linen Tide, Pulau Breeze, Harbour Hour)",
+      "quantity": 400,
+      "uom": "units",
+      "unit_price": 3.0
+    },
+    {
+      "description": "Less: sample deposit paid (Invoice ATL/2026/1098)",
+      "quantity": 1,
+      "uom": "units",
+      "unit_price": -100.0
+    }
+  ],
+  "payment_terms": "Immediate Payment"
+}

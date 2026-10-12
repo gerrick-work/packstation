@@ -1,0 +1,21 @@
+{
+  "type": "credit_note",
+  "number": "RATL/2026/1099",
+  "date": "20/11/2026",
+  "original_invoice": "ATL/2026/1099",
+  "reason": "5 units damaged in transit",
+  "bill_to": {
+    "name": "Example Client Sdn Bhd",
+    "attn": "Jane Tan",
+    "tel": "0123456789",
+    "email": "jane@example.com"
+  },
+  "lines": [
+    {
+      "description": "Credit for 5 x 5ml fragrance damaged in transit",
+      "quantity": 5,
+      "uom": "units",
+      "unit_price": 3.0
+    }
+  ]
+}
