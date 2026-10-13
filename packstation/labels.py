@@ -184,7 +184,7 @@ def icon_names() -> list[str]:
 def labels_for_order(order: Order, catalog: Catalog, cfg: dict) -> list[tuple[Image.Image, Item, bool]]:
     """One label per unit, in item order. Each entry: (image, item, found_in_catalog)."""
     out = []
-    code = order.match_code if cfg.get("match_code", True) else None
+    code = None  # bottle labels carry no order/match code (the waybill alone identifies the parcel)
     for item in order.items:
         data, known = catalog.lookup(item)
         img = render_product_label(data, code, float(cfg.get("width_mm", 40)), float(cfg.get("height_mm", 20)),

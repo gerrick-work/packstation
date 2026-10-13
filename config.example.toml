@@ -73,4 +73,3 @@ gap_mm = 2
 offset_x_mm = 0
 offset_y_mm = 0
 separator = "blank"          # after each order: "blank" label, "divider" (dashed line) or "none"
-match_code = true            # print "#871A" (end of the tracking number) on each bottle label

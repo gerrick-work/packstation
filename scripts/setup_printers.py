@@ -188,7 +188,7 @@ def main() -> None:
         lw, lh = (float(x) for x in re.split(r"[x×*]", size.replace(" ", "")))
         set_values(CONFIG, "printers.label", {**{k: v for k, v in r.items() if k != "invert"},
                                               "width_mm": lw, "height_mm": lh, "dpi": 203,
-                                              "invert": r["invert"], "match_code": True})
+                                              "invert": r["invert"]})
 
     say("\n=== Done! Your printers are set up. ===")
     if mode == "b":

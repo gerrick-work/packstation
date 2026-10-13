@@ -521,7 +521,7 @@ class Engine:
             if name == "label":
                 d = data or LabelData("Sandalwood", "3g", self.catalog.default_brand, "corrosive")
                 c = self.label_cfg
-                img = render_product_label(d, "TEST", float(c["width_mm"]), float(c["height_mm"]),
+                img = render_product_label(d, None, float(c["width_mm"]), float(c["height_mm"]),
                                            int(c.get("dpi", 203)), c.get("font"), c.get("template"))
                 p.print_image(img, "test-label", detail="Test label")
             else:

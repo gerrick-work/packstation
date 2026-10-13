@@ -571,7 +571,7 @@ function renderPack() {
   c.innerHTML = `<div class="row"><div><span class="code" style="font-size:56px">${o.match ? "#" + esc(o.match) : esc(o.order_id)}</span>
       <div class="ids"><span class="src ${esc(o.platform || o.source)}">${esc(o.platform || o.source)}</span> ${esc(o.order_id)}${o.tracking ? " · " + esc(o.tracking) : ""}</div></div>
       <span class="state ${o.state}" style="font-size:15px;padding:8px 14px">${STATE_TEXT[o.state] || o.state}</span></div>
-    <p style="font-size:17px;margin:14px 0 0;color:var(--muted)">Tap each item as it goes into the parcel.${o.match ? ` Every label must show <b style="color:var(--g)">#${esc(o.match)}</b>.` : ""}</p>
+    <p style="font-size:17px;margin:14px 0 0;color:var(--muted)">Tap each item as it goes into the parcel.</p>
     <div class="units">${ticks.map((t, i) => `<button class="unit ${t.done ? "done" : ""}" data-i="${i}"><span class="tick">${t.done ? "✓" : ""}</span>${esc(t.name)}</button>`).join("")}</div>
     <button class="packbtn ${all ? "ready" : ""}" id="packDone">${o.state === "packed" ? "Already packed ✓" : all ? "Packed ✓  Next parcel" : `${ticks.filter(t => t.done).length} of ${ticks.length} items in`}</button>`;
   c.classList.add("on");
