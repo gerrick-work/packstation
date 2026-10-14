@@ -707,13 +707,16 @@ function renderSettings() {
       <div class="fieldrow"><label>Courier booking</label><span class="seg" id="shipSeg">
         <button data-v="dropoff" class="${st.tiktok_ship_method !== "pickup" ? "on" : ""}">Drop-off</button>
         <button data-v="pickup" class="${st.tiktok_ship_method === "pickup" ? "on" : ""}">Pickup</button></span></div></div>
-    <div class="pcard"><h2>Which Odoo deliveries to show</h2>
+    <div class="pcard" style="grid-column:1/-1"><h2>Which Odoo deliveries to show</h2>
       <p>Ready = stock reserved. Choose "Ready + Waiting" if a warehouse (e.g. Singapore) never shows Ready because stock isn't reserved there.</p>
       <div class="fieldrow"><span class="seg" id="stateSeg">
         <button data-v="0" class="${(st.picking_states || []).includes("confirmed") ? "" : "on"}">Ready only</button>
         <button data-v="1" class="${(st.picking_states || []).includes("confirmed") ? "on" : ""}">Ready + Waiting</button></span></div>
+      <div class="fieldrow"><label>Dropship operations</label><span class="seg" id="dropSeg">
+        <button data-v="0" class="${(st.picking_type_codes || []).includes("dropship") ? "" : "on"}">Leave out</button>
+        <button data-v="1" class="${(st.picking_type_codes || []).includes("dropship") ? "on" : ""}">Include</button></span></div>
       <button class="btn" id="checkBtn" style="width:100%" ${st.odoo ? "" : "disabled"}>Check Odoo orders</button>
-      <div id="checkOut"></div></div>
+      <div id="checkOut" style="overflow-x:auto"></div></div>
     <div class="pcard"><h2>Labels</h2>
       <div class="fieldrow"><label>Default brand</label><input id="brandIn" value="${esc(st.brand)}"></div>
       <button class="btn solid" id="brandSave">Save brand</button></div>
@@ -727,7 +730,8 @@ function renderSettings() {
       <input type="file" id="zipIn" accept=".zip" style="margin:6px 0 12px;font-size:15px">
       <button class="btn solid" id="updBtn" style="width:100%">Install update and restart</button></div>
     <div class="pcard"><h2>Restart Pack Station</h2>
-      <p>Use this after an update, or if something seems stuck. Takes about 5 seconds; this page reconnects by itself.</p>
+      <p>Use this after an update, or if something seems stuck. Takes about 5 seconds; this page reconnects by itself.<br>
+      Running version <b>${esc(S.version || "?")}</b>.</p>
       <button class="btn danger" id="restartBtn" style="width:100%">Restart Pack Station</button></div>`;
   const save = async (body, what) => {
     const r = await api("/api/settings", {method: "POST", body: JSON.stringify(body)});
@@ -736,15 +740,25 @@ function renderSettings() {
   };
   document.querySelectorAll("#shipSeg button").forEach(b => b.onclick = () => save({tiktok_ship_method: b.dataset.v}, "Courier booking"));
   document.querySelectorAll("#stateSeg button").forEach(b => b.onclick = () => save({include_waiting: b.dataset.v === "1"}, "Order setting"));
+  document.querySelectorAll("#dropSeg button").forEach(b => b.onclick = () => save({include_dropship: b.dataset.v === "1"}, "Dropship setting"));
   $("#checkBtn").onclick = async () => {
     $("#checkOut").innerHTML = `<p class="hint">Checking Odoo…</p>`;
     const r = await api("/api/odoo-check");
     if (!r.ok) { $("#checkOut").innerHTML = `<div class="errbox">${esc(errText(r.error))}</div>`; return; }
-    const rows = r.rows.map(x => `<tr><td>${esc(x.company)}</td><td>${esc(x.operation)}</td><td>${esc(x.state_label)}</td>
-      <td style="text-align:right">${x.count}</td><td>${x.listed ? '<span class="ok">Shown</span>' : '<span class="no">Not shown</span>'}</td></tr>`).join("");
-    $("#checkOut").innerHTML = `<p class="hint">Open deliveries in Odoo, all ${r.companies.length || 1} compan${r.companies.length === 1 ? "y" : "ies"} this login can see. Checked ${new Date().toLocaleTimeString()}.</p>
-      <table class="logtable"><thead><tr><th>Company</th><th>Operation</th><th>Status</th><th>Orders</th><th>Pack Station</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="5" class="hint">No open deliveries.</td></tr>`}</tbody></table>`;
+    const yes = '<span class="ok">Shown</span>', no = '<span class="no">Not shown</span>';
+    const typeName = t => ({outgoing: "Delivery", internal: "Internal", dropship: "Dropship", mrp_operation: "Manufacturing"}[t] || t);
+    const del = r.deliveries.map(x => `<tr><td>${esc(x.company)}</td><td>${esc(x.operation)}</td><td>${esc(typeName(x.type))}</td><td>${esc(x.state_label)}</td>
+      <td style="text-align:right">${x.count}</td><td>${x.listed ? yes : no}</td></tr>`).join("");
+    const sal = r.sales.map(x => `<tr><td>${esc(x.company)}</td><td>${esc(x.team)}</td><td style="text-align:right">${x.orders}</td>
+      <td style="text-align:right">${x.listed}</td><td style="text-align:right">${x.no_delivery}</td></tr>`).join("");
+    $("#checkOut").innerHTML = `<p class="hint">Pack Station version ${esc(S.version)} · checked ${new Date().toLocaleTimeString()}<br>
+      Companies this Odoo login can see: <b>${esc(r.companies.join(", ") || "only its main company")}</b></p>
+      <h3>Sale orders, last ${r.days} days</h3>
+      <table class="logtable"><thead><tr><th>Company</th><th>Shop / sales team</th><th>Orders</th><th>Shown in Pack Station</th><th>No delivery yet</th></tr></thead>
+      <tbody>${sal || `<tr><td colspan="5" class="hint">No sale orders in Odoo in the last ${r.days} days.</td></tr>`}</tbody></table>
+      <h3>Open transfers</h3>
+      <table class="logtable"><thead><tr><th>Company</th><th>Operation</th><th>Type</th><th>Status</th><th>Count</th><th>Pack Station</th></tr></thead>
+      <tbody>${del || `<tr><td colspan="6" class="hint">No open transfers.</td></tr>`}</tbody></table>`;
   };
   $("#brandSave").onclick = () => save({brand: $("#brandIn").value}, "Brand");
   $("#pinSave").onclick = () => save({pin: $("#pinIn").value}, "PIN");

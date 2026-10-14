@@ -88,8 +88,15 @@ class FakeOdoo:
                     else {"type": "char"} for n in self.pickings[73]}
         if model == "res.users" and method == "read":
             return [{"id": 2, "company_ids": [1, 2]}]
+        if model == "res.company" and method == "read":
+            return [{"id": i, "name": {1: "Atlas DSF (MY)", 2: "Atlas DSF (SG)"}[i]} for i in args[0]]
+        if model == "sale.order" and method == "search_read":
+            return [{"id": 9, "company_id": [1, "Atlas DSF (MY)"], "team_id": [5, "Shopee MY"], "picking_ids": [80], "state": "sale"},
+                    {"id": 30, "company_id": [2, "Atlas DSF (SG)"], "team_id": [6, "Shopee SG"], "picking_ids": [201], "state": "sale"},
+                    {"id": 31, "company_id": [2, "Atlas DSF (SG)"], "team_id": [6, "Shopee SG"], "picking_ids": [], "state": "sale"}]
         if model == "stock.picking" and method == "read":
-            return [dict(self.pickings[i]) for i in args[0]]
+            return [dict(self.pickings[i], picking_type_code=self.pickings[i].get("picking_type_code", "outgoing"))
+                    for i in args[0] if i in self.pickings]
         if model == "stock.picking" and method == "search_read":
             out = []
             for pk in self.pickings.values():
@@ -99,10 +106,14 @@ class FakeOdoo:
                         ok = False
                     if f == "state" and op == "not in" and pk["state"] in v:
                         ok = False
+                    code = pk.get("picking_type_code", "outgoing")
+                    if f == "picking_type_code" and ((op == "in" and code not in v) or (op == "=" and code != v)
+                                                     or (op == "!=" and code == v)):
+                        ok = False
                 if kw.get("context", {}).get("allowed_company_ids") != [1, 2] and pk["company_id"][0] != 1:
                     ok = False  # like Odoo: other companies hidden unless allowed in the context
                 if ok:
-                    out.append(dict(pk))
+                    out.append(dict(pk, picking_type_code=pk.get("picking_type_code", "outgoing")))
             return out
         if model == "stock.move" and method == "read":
             return [{"id": i, "product_id": [100 + i, "x"], "product_uom_qty": 2.0 if i == 1 else 1.0} for i in args[0]]
@@ -533,9 +544,21 @@ def test_odoo_check_explains_where_orders_are(tmp_path):
     eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=fake)])
     c = create_app(eng).test_client()
     r = c.get("/api/odoo-check").get_json()
-    sg_wait = [x for x in r["rows"] if x["company"] == "Atlas DSF (SG)" and x["state"] == "confirmed"]
-    assert sg_wait and sg_wait[0]["count"] == 1 and not sg_wait[0]["listed"]
-    assert r["companies"] == [1, 2]
+    sg_wait = [x for x in r["deliveries"] if x["company"] == "Atlas DSF (SG)" and x["state"] == "confirmed"]
+    assert sg_wait and sg_wait[0]["count"] == 1 and not sg_wait[0]["listed"] and sg_wait[0]["type"] == "outgoing"
+    assert r["companies"] == ["Atlas DSF (MY)", "Atlas DSF (SG)"]
+    sg = next(x for x in r["sales"] if x["team"] == "Shopee SG")
+    assert sg == {"company": "Atlas DSF (SG)", "team": "Shopee SG", "orders": 2, "listed": 0, "no_delivery": 1}
+    assert c.get("/api/state").get_json()["version"]
+
+
+def test_dropship_type_can_be_included():
+    fake = FakeOdoo()
+    add_singapore(fake)
+    fake.pickings[200]["picking_type_code"] = "dropship"
+    assert "SG/OUT/00012" not in {o.order_id for o in OdooSource({}, rpc=fake).list_orders()}
+    src = OdooSource({"picking_type_codes": ["outgoing", "dropship"]}, rpc=fake)
+    assert "SG/OUT/00012" in {o.order_id for o in src.list_orders()}
 
 
 def test_waiting_switch_saves_from_settings(tmp_path):
@@ -545,3 +568,12 @@ def test_waiting_switch_saves_from_settings(tmp_path):
     assert c.post("/api/settings", json={"include_waiting": True}).get_json()["ok"]
     saved = tomllib.loads((tmp_path / "config.toml").read_text())["odoo"]["picking_states"]
     assert saved == ["assigned", "confirmed", "waiting"]
+
+
+def test_dropship_switch_saves_from_settings(tmp_path):
+    from packstation.web import create_app
+    eng = Engine(write_cfg(tmp_path), sources=[DemoSource()])
+    c = create_app(eng).test_client()
+    assert c.post("/api/settings", json={"include_dropship": True}).get_json()["ok"]
+    saved = tomllib.loads((tmp_path / "config.toml").read_text())["odoo"]["picking_type_codes"]
+    assert saved == ["outgoing", "dropship"]

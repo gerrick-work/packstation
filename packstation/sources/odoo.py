@@ -59,6 +59,8 @@ class OdooSource(Source):
         # reserved stock (e.g. a Singapore warehouse fulfilled from Malaysia).
         self.states = list(cfg.get("picking_states", ["assigned"]))
         self.all_companies = bool(cfg.get("all_companies", True))
+        # Odoo operation types to read: "outgoing" = Delivery. Add e.g. "dropship" if a shop ships that way.
+        self.type_codes = list(cfg.get("picking_type_codes", ["outgoing"]))
         self._ctx = None
         self.sleep = sleep
         self._uid = None
@@ -146,7 +148,7 @@ class OdooSource(Source):
         if "company_id" in f:
             read.append("company_id")
         pickings = self._x("stock.picking", "search_read",
-                           [("picking_type_code", "=", "outgoing"), ("state", "in", self.states)],
+                           [("picking_type_code", "in", self.type_codes), ("state", "in", self.states)],
                            fields=read, context=ctx)
         move_ids = [m for p in pickings for m in p.get("move_ids", [])]
         moves = {m["id"]: m for m in self._x("stock.move", "read", move_ids,
@@ -159,24 +161,58 @@ class OdooSource(Source):
             "sale.order", "read", sale_ids, fields=[self.ref_field], context=ctx)} if sale_ids else {}
         return [self._to_order(p, moves, prods, refs) for p in pickings]
 
-    def check(self) -> list[dict]:
-        """Every open outgoing delivery, counted by company, operation type and status, and whether
-        Pack Station lists it. Read only; shown on the Settings screen to explain missing orders."""
+    def check(self, days: int = 14) -> dict:
+        """Where are the orders? Read only; shown on the Settings screen to explain missing orders.
+        - companies: the Odoo companies this login can see
+        - deliveries: every open stock transfer except receipts, by company, operation, type and status,
+          and whether Pack Station lists it (only "Delivery" type, in the chosen statuses)
+        - sales: sale orders of the last `days` days by company and sales team/channel, and how many
+          have a delivery Pack Station can list"""
+        from datetime import date, timedelta
+
         ctx = self.ctx()
         f = self.fields()
-        fields = ["state", "picking_type_id"] + (["company_id"] if "company_id" in f else [])
+        comp_ids = ctx.get("allowed_company_ids") or []
+        companies = [c["name"] for c in self._x("res.company", "read", comp_ids, fields=["name"], context=ctx)] \
+            if comp_ids else []
+        fields = ["state", "picking_type_id", "picking_type_code"] + (["company_id"] if "company_id" in f else [])
         rows = self._x("stock.picking", "search_read",
-                       [("picking_type_code", "=", "outgoing"), ("state", "not in", ["done", "cancel"])],
+                       [("picking_type_code", "!=", "incoming"), ("state", "not in", ["done", "cancel"])],
                        fields=fields, context=ctx)
         labels = {"draft": "Draft", "waiting": "Waiting another operation", "confirmed": "Waiting (no stock reserved)",
                   "assigned": "Ready"}
         groups: dict[tuple, int] = {}
         for r in rows:
-            key = ((r.get("company_id") or [0, "?"])[1], (r.get("picking_type_id") or [0, "?"])[1], r["state"])
+            key = ((r.get("company_id") or [0, "?"])[1], (r.get("picking_type_id") or [0, "?"])[1],
+                   r.get("picking_type_code") or "?", r["state"])
             groups[key] = groups.get(key, 0) + 1
-        return [{"company": c, "operation": t, "state": s, "state_label": labels.get(s, s), "count": n,
-                 "listed": s in self.states}
-                for (c, t, s), n in sorted(groups.items())]
+        deliveries = [{"company": c, "operation": t, "type": code, "state": s, "state_label": labels.get(s, s),
+                       "count": n, "listed": code in self.type_codes and s in self.states}
+                      for (c, t, code, s), n in sorted(groups.items())]
+
+        since = (date.today() - timedelta(days=days)).isoformat()
+        orders = self._x("sale.order", "search_read", [("date_order", ">=", since), ("state", "!=", "cancel")],
+                         fields=["company_id", "team_id", "picking_ids", "state"], context=ctx)
+        pick_ids = [i for o in orders for i in o.get("picking_ids") or []]
+        picks = {p["id"]: p for p in self._x("stock.picking", "read", pick_ids,
+                                             fields=["state", "picking_type_code"], context=ctx)} if pick_ids else {}
+        sales: dict[tuple, list] = {}
+        for o in orders:
+            key = ((o.get("company_id") or [0, "?"])[1], (o.get("team_id") or [0, "No sales team"])[1])
+            listable = any(picks.get(i, {}).get("picking_type_code") in self.type_codes
+                           and picks.get(i, {}).get("state") in self.states for i in o.get("picking_ids") or [])
+            no_delivery = not o.get("picking_ids")
+            g = sales.setdefault(key, [0, 0, 0])
+            g[0] += 1
+            g[1] += listable
+            g[2] += no_delivery
+        return {
+            "companies": companies,
+            "deliveries": deliveries,
+            "sales": [{"company": c, "team": t, "orders": n, "listed": l, "no_delivery": nd}
+                      for (c, t), (n, l, nd) in sorted(sales.items())],
+            "days": days,
+        }
 
     def _platform(self, p: dict) -> str:
         def truthy(v):

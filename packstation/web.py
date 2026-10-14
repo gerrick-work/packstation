@@ -176,10 +176,12 @@ def create_app(engine: Engine) -> Flask:
                 "pin_set": bool(pin()),
                 "odoo": bool(engine.odoo),
                 "picking_states": engine.odoo.states if engine.odoo else ["assigned"],
+                "picking_type_codes": engine.odoo.type_codes if engine.odoo else ["outgoing"],
             },
             "addresses": lan_addresses(port),
             "codes": CODES,
             "server_time": time.strftime("%H:%M:%S"),
+            "version": __import__("packstation").__version__,
         })
 
     @app.post("/api/refresh")
@@ -336,6 +338,9 @@ def create_app(engine: Engine) -> Flask:
             if body.get("include_waiting") is not None:
                 states = ["assigned", "confirmed", "waiting"] if body["include_waiting"] else ["assigned"]
                 engine.save_settings("odoo", {"picking_states": states})
+            if body.get("include_dropship") is not None:
+                codes = ["outgoing", "dropship"] if body["include_dropship"] else ["outgoing"]
+                engine.save_settings("odoo", {"picking_type_codes": codes})
             if "brand" in body and str(body["brand"]).strip():
                 engine.save_settings("labels", {"brand": str(body["brand"]).strip()})
             if "pin" in body:
@@ -353,8 +358,7 @@ def create_app(engine: Engine) -> Flask:
         if not engine.odoo:
             return err(PackError("CONFIG", "checking Odoo", "Odoo isn't switched on in config.toml"))
         try:
-            return jsonify(ok=True, rows=engine.odoo.check(), states=engine.odoo.states,
-                           companies=(engine.odoo.ctx() or {}).get("allowed_company_ids", []))
+            return jsonify(ok=True, states=engine.odoo.states, **engine.odoo.check())
         except Exception as e:
             from .errors import classify
             return err(classify(e, "checking Odoo"))
