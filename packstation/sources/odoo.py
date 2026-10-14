@@ -54,6 +54,12 @@ class OdooSource(Source):
         self.f_sp_status = cfg.get("shopee_status_field", "shopee_label_status")
         self.f_sp_label = cfg.get("shopee_label_field", "")  # found automatically when empty
         self.tt_arrange_states = cfg.get("tiktok_arrange_states", ["confirmed"])
+        # Which delivery statuses count as "to pack". Odoo: assigned = Ready, confirmed = Waiting,
+        # waiting = Waiting another operation. Settings can add "Waiting" for warehouses without
+        # reserved stock (e.g. a Singapore warehouse fulfilled from Malaysia).
+        self.states = list(cfg.get("picking_states", ["assigned"]))
+        self.all_companies = bool(cfg.get("all_companies", True))
+        self._ctx = None
         self.sleep = sleep
         self._uid = None
         self._fields = None
@@ -99,6 +105,24 @@ class OdooSource(Source):
         except (OSError, socket.timeout, xmlrpc.client.ProtocolError) as e:
             raise PackError("ODOO-NET", step, str(e)[:160]) from e
 
+    def ctx(self) -> dict:
+        """Read across every company this Odoo user can access (e.g. Malaysia and Singapore),
+        not only the login's current company."""
+        if self._ctx is None:
+            self._ctx = {}
+            if self.all_companies:
+                try:
+                    me = self._x("res.users", "read", [self.uid if self._rpc is None else 0],
+                                 fields=["company_ids"])
+                    ids = (me[0].get("company_ids") if me else None) or []
+                    if ids:
+                        self._ctx = {"allowed_company_ids": ids}
+                except PackError:
+                    raise
+                except Exception:
+                    self._ctx = {}
+        return self._ctx
+
     def fields(self) -> dict:
         if self._fields is None:
             self._fields = self._x("stock.picking", "fields_get", attributes=["type", "relation"])
@@ -118,18 +142,41 @@ class OdooSource(Source):
         platform_fields = [n for n in f if (n.startswith("tiktok_") or n.startswith("shopee_"))
                            and f[n].get("type") in ("char", "selection", "many2one", "integer")]
         read = sorted({n for n in wanted + platform_fields if n and n in f})
+        ctx = self.ctx()
+        if "company_id" in f:
+            read.append("company_id")
         pickings = self._x("stock.picking", "search_read",
-                           [("picking_type_code", "=", "outgoing"), ("state", "=", "assigned")], fields=read)
+                           [("picking_type_code", "=", "outgoing"), ("state", "in", self.states)],
+                           fields=read, context=ctx)
         move_ids = [m for p in pickings for m in p.get("move_ids", [])]
         moves = {m["id"]: m for m in self._x("stock.move", "read", move_ids,
-                                             fields=["product_id", "product_uom_qty"])} if move_ids else {}
+                                             fields=["product_id", "product_uom_qty"], context=ctx)} if move_ids else {}
         prod_ids = list({m["product_id"][0] for m in moves.values() if m.get("product_id")})
         prods = {p["id"]: p for p in self._x("product.product", "read", prod_ids,
-                                             fields=["default_code", "display_name"])} if prod_ids else {}
+                                             fields=["default_code", "display_name"], context=ctx)} if prod_ids else {}
         sale_ids = [p["sale_id"][0] for p in pickings if p.get("sale_id")]
         refs = {s["id"]: s.get(self.ref_field) or "" for s in self._x(
-            "sale.order", "read", sale_ids, fields=[self.ref_field])} if sale_ids else {}
+            "sale.order", "read", sale_ids, fields=[self.ref_field], context=ctx)} if sale_ids else {}
         return [self._to_order(p, moves, prods, refs) for p in pickings]
+
+    def check(self) -> list[dict]:
+        """Every open outgoing delivery, counted by company, operation type and status, and whether
+        Pack Station lists it. Read only; shown on the Settings screen to explain missing orders."""
+        ctx = self.ctx()
+        f = self.fields()
+        fields = ["state", "picking_type_id"] + (["company_id"] if "company_id" in f else [])
+        rows = self._x("stock.picking", "search_read",
+                       [("picking_type_code", "=", "outgoing"), ("state", "not in", ["done", "cancel"])],
+                       fields=fields, context=ctx)
+        labels = {"draft": "Draft", "waiting": "Waiting another operation", "confirmed": "Waiting (no stock reserved)",
+                  "assigned": "Ready"}
+        groups: dict[tuple, int] = {}
+        for r in rows:
+            key = ((r.get("company_id") or [0, "?"])[1], (r.get("picking_type_id") or [0, "?"])[1], r["state"])
+            groups[key] = groups.get(key, 0) + 1
+        return [{"company": c, "operation": t, "state": s, "state_label": labels.get(s, s), "count": n,
+                 "listed": s in self.states}
+                for (c, t, s), n in sorted(groups.items())]
 
     def _platform(self, p: dict) -> str:
         def truthy(v):
@@ -190,7 +237,7 @@ class OdooSource(Source):
         read = [n for n in ["name", "move_ids", "sale_id", "scheduled_date", "date_deadline", self.f_tracking,
                             self.f_tt_status, self.f_tt_label, self.f_sp_status, self.f_sp_label] if n and n in f]
         read += [n for n in f if (n.startswith("tiktok_") or n.startswith("shopee_")) and "tracking" in n]
-        p = self._x("stock.picking", "read", [order.odoo_picking_id], fields=read)[0]
+        p = self._x("stock.picking", "read", [order.odoo_picking_id], fields=read, context=self.ctx())[0]
         fresh = self._to_order(p, {}, {}, {})
         fresh.items, fresh.ref["platform_ref"] = order.items, order.ref.get("platform_ref", "")
         return fresh
@@ -201,7 +248,7 @@ class OdooSource(Source):
         att = order.ref.get("label_attachment_id")
         if not att:
             raise PackError("WAYBILL-MISSING", "fetching waybill from Odoo")
-        rows = self._x("ir.attachment", "read", [att], fields=["datas", "mimetype", "name"])
+        rows = self._x("ir.attachment", "read", [att], fields=["datas", "mimetype", "name"], context=self.ctx())
         if not rows or not rows[0].get("datas"):
             raise PackError("WAYBILL-MISSING", "fetching waybill from Odoo", "attachment is empty")
         return base64.b64decode(rows[0]["datas"])
@@ -213,10 +260,10 @@ class OdooSource(Source):
         step = "arranging TikTok shipment"
         pid = order.odoo_picking_id
         try:
-            action = self._x("stock.picking", "action_tiktok_ship_order", [pid], step=step)
+            action = self._x("stock.picking", "action_tiktok_ship_order", [pid], step=step, context=self.ctx())
             if isinstance(action, dict) and action.get("res_model"):
                 self._run_wizard(action, method, step)
-            self._x("stock.picking", "action_tiktok_sync_pickings", [pid], step=step)
+            self._x("stock.picking", "action_tiktok_sync_pickings", [pid], step=step, context=self.ctx())
         except PackError as e:
             if e.code in ("ODOO-NET", "ODOO-AUTH"):
                 raise
@@ -229,7 +276,7 @@ class OdooSource(Source):
                 return fresh
             self.sleep(4)
             try:
-                self._x("stock.picking", "action_tiktok_sync_pickings", [pid], step=step)
+                self._x("stock.picking", "action_tiktok_sync_pickings", [pid], step=step, context=self.ctx())
             except Exception:
                 pass
         raise PackError("TIKTOK-ARRANGE", "waiting for TikTok label",
@@ -240,6 +287,7 @@ class OdooSource(Source):
         ctx = action.get("context") or {}
         if isinstance(ctx, str):
             ctx = {}
+        ctx = {**self.ctx(), **ctx}
         wf = self._x(model, "fields_get", attributes=["type", "selection"], step=step)
         vals = {}
         want = re.sub(r"[^a-z]", "", method.lower())
@@ -298,11 +346,12 @@ class OdooSource(Source):
 
     def sync_tiktok(self, picking_ids: list[int]) -> None:
         if picking_ids:
-            self._x("stock.picking", "action_tiktok_sync_pickings", picking_ids, step="syncing TikTok deliveries")
+            self._x("stock.picking", "action_tiktok_sync_pickings", picking_ids, step="syncing TikTok deliveries",
+                    context=self.ctx())
 
     def note_printed(self, picking_id: int, text: str) -> None:
         if self.post_note:
-            self._x("stock.picking", "message_post", [picking_id], body=text)
+            self._x("stock.picking", "message_post", [picking_id], body=text, context=self.ctx())
 
 
 def _primary_button(arch: str) -> str | None:

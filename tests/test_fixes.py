@@ -75,6 +75,9 @@ class FakeOdoo:
                  "tiktok_label_attachment_id": False, "shopee_label_status": False,
                  "shopee_label_attachment_id": False},
         }
+        for pk in self.pickings.values():
+            pk.setdefault("state", "assigned")
+            pk.setdefault("company_id", [1, "Atlas DSF (MY)"])
         self.cron_fail = None
         self.wizard_vals = None
 
@@ -83,9 +86,24 @@ class FakeOdoo:
         if model == "stock.picking" and method == "fields_get":
             return {n: {"type": "many2one", "relation": "ir.attachment"} if n.endswith("attachment_id")
                     else {"type": "char"} for n in self.pickings[73]}
-        if model == "stock.picking" and method in ("search_read", "read"):
-            ids = args[0] if method == "read" else list(self.pickings)
-            return [dict(self.pickings[i]) for i in ids]
+        if model == "res.users" and method == "read":
+            return [{"id": 2, "company_ids": [1, 2]}]
+        if model == "stock.picking" and method == "read":
+            return [dict(self.pickings[i]) for i in args[0]]
+        if model == "stock.picking" and method == "search_read":
+            out = []
+            for pk in self.pickings.values():
+                ok = True
+                for f, op, v in args[0]:
+                    if f == "state" and op == "in" and pk["state"] not in v:
+                        ok = False
+                    if f == "state" and op == "not in" and pk["state"] in v:
+                        ok = False
+                if kw.get("context", {}).get("allowed_company_ids") != [1, 2] and pk["company_id"][0] != 1:
+                    ok = False  # like Odoo: other companies hidden unless allowed in the context
+                if ok:
+                    out.append(dict(pk))
+            return out
         if model == "stock.move" and method == "read":
             return [{"id": i, "product_id": [100 + i, "x"], "product_uom_qty": 2.0 if i == 1 else 1.0} for i in args[0]]
         if model == "product.product" and method == "read":
@@ -476,3 +494,54 @@ def test_bottle_labels_have_no_match_code(tmp_path):
     with_setting = labels_for_order(order, cat, {"width_mm": 40, "height_mm": 20, "match_code": True})[0][0]
     plain = render_product_label(LabelData("Sandalwood", "3g", "atlas origins", ""), None, 40, 20)
     assert with_setting.tobytes() == plain.tobytes()       # old "match_code = true" settings are ignored
+
+
+
+# ---------------------------------------------------------------- Singapore orders (second Odoo company)
+
+def add_singapore(fake):
+    base = dict(fake.pickings[80])
+    fake.pickings[200] = {**base, "id": 200, "name": "SG/OUT/00012", "carrier_tracking_ref": "SPXSG0400555Q",
+                          "company_id": [2, "Atlas DSF (SG)"], "shopee_label_attachment_id": [501, "sg.pdf"]}
+    fake.pickings[201] = {**base, "id": 201, "name": "SG/OUT/00013", "carrier_tracking_ref": "SPXSG0400666R",
+                          "company_id": [2, "Atlas DSF (SG)"], "state": "confirmed",
+                          "shopee_label_attachment_id": [501, "sg.pdf"]}
+
+
+def test_singapore_company_orders_are_scanned():
+    fake = FakeOdoo()
+    add_singapore(fake)
+    names = {o.order_id for o in OdooSource({}, rpc=fake).list_orders()}
+    assert "SG/OUT/00012" in names                      # second company now read
+    assert "SG/OUT/00013" not in names                  # Waiting: only with the setting below
+    sr = [c for c in fake.calls if c[1] == "search_read"][-1]
+    assert sr[3]["context"] == {"allowed_company_ids": [1, 2]}
+
+
+def test_ready_plus_waiting_setting_includes_waiting_deliveries():
+    fake = FakeOdoo()
+    add_singapore(fake)
+    names = {o.order_id for o in OdooSource({"picking_states": ["assigned", "confirmed", "waiting"]},
+                                           rpc=fake).list_orders()}
+    assert {"SG/OUT/00012", "SG/OUT/00013"} <= names
+
+
+def test_odoo_check_explains_where_orders_are(tmp_path):
+    from packstation.web import create_app
+    fake = FakeOdoo()
+    add_singapore(fake)
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=fake)])
+    c = create_app(eng).test_client()
+    r = c.get("/api/odoo-check").get_json()
+    sg_wait = [x for x in r["rows"] if x["company"] == "Atlas DSF (SG)" and x["state"] == "confirmed"]
+    assert sg_wait and sg_wait[0]["count"] == 1 and not sg_wait[0]["listed"]
+    assert r["companies"] == [1, 2]
+
+
+def test_waiting_switch_saves_from_settings(tmp_path):
+    from packstation.web import create_app
+    eng = Engine(write_cfg(tmp_path), sources=[DemoSource()])
+    c = create_app(eng).test_client()
+    assert c.post("/api/settings", json={"include_waiting": True}).get_json()["ok"]
+    saved = tomllib.loads((tmp_path / "config.toml").read_text())["odoo"]["picking_states"]
+    assert saved == ["assigned", "confirmed", "waiting"]

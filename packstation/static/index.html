@@ -707,6 +707,13 @@ function renderSettings() {
       <div class="fieldrow"><label>Courier booking</label><span class="seg" id="shipSeg">
         <button data-v="dropoff" class="${st.tiktok_ship_method !== "pickup" ? "on" : ""}">Drop-off</button>
         <button data-v="pickup" class="${st.tiktok_ship_method === "pickup" ? "on" : ""}">Pickup</button></span></div></div>
+    <div class="pcard"><h2>Which Odoo deliveries to show</h2>
+      <p>Ready = stock reserved. Choose "Ready + Waiting" if a warehouse (e.g. Singapore) never shows Ready because stock isn't reserved there.</p>
+      <div class="fieldrow"><span class="seg" id="stateSeg">
+        <button data-v="0" class="${(st.picking_states || []).includes("confirmed") ? "" : "on"}">Ready only</button>
+        <button data-v="1" class="${(st.picking_states || []).includes("confirmed") ? "on" : ""}">Ready + Waiting</button></span></div>
+      <button class="btn" id="checkBtn" style="width:100%" ${st.odoo ? "" : "disabled"}>Check Odoo orders</button>
+      <div id="checkOut"></div></div>
     <div class="pcard"><h2>Labels</h2>
       <div class="fieldrow"><label>Default brand</label><input id="brandIn" value="${esc(st.brand)}"></div>
       <button class="btn solid" id="brandSave">Save brand</button></div>
@@ -728,6 +735,17 @@ function renderSettings() {
     await refreshState(); renderSettings();
   };
   document.querySelectorAll("#shipSeg button").forEach(b => b.onclick = () => save({tiktok_ship_method: b.dataset.v}, "Courier booking"));
+  document.querySelectorAll("#stateSeg button").forEach(b => b.onclick = () => save({include_waiting: b.dataset.v === "1"}, "Order setting"));
+  $("#checkBtn").onclick = async () => {
+    $("#checkOut").innerHTML = `<p class="hint">Checking Odoo…</p>`;
+    const r = await api("/api/odoo-check");
+    if (!r.ok) { $("#checkOut").innerHTML = `<div class="errbox">${esc(errText(r.error))}</div>`; return; }
+    const rows = r.rows.map(x => `<tr><td>${esc(x.company)}</td><td>${esc(x.operation)}</td><td>${esc(x.state_label)}</td>
+      <td style="text-align:right">${x.count}</td><td>${x.listed ? '<span class="ok">Shown</span>' : '<span class="no">Not shown</span>'}</td></tr>`).join("");
+    $("#checkOut").innerHTML = `<p class="hint">Open deliveries in Odoo, all ${r.companies.length || 1} compan${r.companies.length === 1 ? "y" : "ies"} this login can see. Checked ${new Date().toLocaleTimeString()}.</p>
+      <table class="logtable"><thead><tr><th>Company</th><th>Operation</th><th>Status</th><th>Orders</th><th>Pack Station</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="5" class="hint">No open deliveries.</td></tr>`}</tbody></table>`;
+  };
   $("#brandSave").onclick = () => save({brand: $("#brandIn").value}, "Brand");
   $("#pinSave").onclick = () => save({pin: $("#pinIn").value}, "PIN");
   $("#pinClear").onclick = () => save({pin: ""}, "PIN removal");
