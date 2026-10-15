@@ -343,9 +343,9 @@ class Engine:
                     raise PackError("WAYBILL-MISSING", "fetching waybill")
                 step = "fetching waybill"
                 waybill = src.get_waybill(order)
-                if not order.tracking:
-                    raise PackError("WAYBILL-MISSING", "reading tracking number",
-                                    "waybill has no tracking number in Odoo yet; press Refresh")
+                if not order.tracking:  # the waybill itself carries it; Odoo's copy can lag behind
+                    self.log.add("info", "Waybill found, but Odoo has no tracking number for it yet. Printed anyway.",
+                                 key=order.key)
                 step = "printing waybill on the waybill printer"
                 if job:
                     job.current = f"{tag}: waybill"

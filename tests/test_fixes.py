@@ -80,6 +80,7 @@ class FakeOdoo:
             pk.setdefault("company_id", [1, "Atlas DSF (MY)"])
         self.cron_fail = None
         self.wizard_vals = None
+        self.files = []  # plain attachments: {id, name, res_model, res_id, mimetype, create_date}
 
     def __call__(self, model, method, *args, **kw):
         self.calls.append((model, method, args, kw))
@@ -121,6 +122,16 @@ class FakeOdoo:
             return [{"id": i, "default_code": f"ML-{i}", "display_name": f"Linalool {i} 3g"} for i in args[0]]
         if model == "sale.order" and method == "read":
             return [{"id": i, "client_order_ref": f"PLAT{i}"} for i in args[0]]
+        if model == "ir.attachment" and method == "search_read":
+            pick = sale = []
+            dom = args[0]
+            for i, t in enumerate(dom):
+                if t == ("res_model", "=", "stock.picking"):
+                    pick = dom[i + 1][2]
+                if t == ("res_model", "=", "sale.order"):
+                    sale = dom[i + 1][2]
+            return [a for a in self.files if (a["res_model"] == "stock.picking" and a["res_id"] in pick)
+                    or (a["res_model"] == "sale.order" and a["res_id"] in sale)]
         if model == "ir.attachment" and method == "read":
             return [{"id": i, "datas": self.att[i], "mimetype": "application/pdf", "name": "l.pdf"} for i in args[0]]
         if model == "stock.picking" and method == "action_tiktok_ship_order":
@@ -577,3 +588,68 @@ def test_dropship_switch_saves_from_settings(tmp_path):
     assert c.post("/api/settings", json={"include_dropship": True}).get_json()["ok"]
     saved = tomllib.loads((tmp_path / "config.toml").read_text())["odoo"]["picking_type_codes"]
     assert saved == ["outgoing", "dropship"]
+
+
+# ---------------------------------------------------------------- TikTok waybills saved elsewhere
+
+def tiktok_ready(fake, pid=73):
+    fake.pickings[pid].update(tiktok_delivery_status="ready_to_ship", carrier_tracking_ref=False)
+
+
+def test_tiktok_waybill_saved_as_plain_attachment_is_found(tmp_path):
+    fake = FakeOdoo()
+    tiktok_ready(fake)
+    fake.att[900] = base64.b64encode(pdf_bytes()).decode()
+    fake.files = [{"id": 899, "name": "S00073.pdf", "res_model": "sale.order", "res_id": 9,
+                   "mimetype": "application/pdf", "create_date": "2026-10-14"},
+                  {"id": 900, "name": "TikTok Shipping Label.pdf", "res_model": "stock.picking", "res_id": 73,
+                   "mimetype": "application/pdf", "create_date": "2026-10-14"}]
+    src = OdooSource({}, rpc=fake, sleep=lambda s: None)
+    eng = Engine(write_cfg(tmp_path), sources=[src])
+    eng.scan()
+    o = by_name(eng)["WH/OUT/00073"]
+    assert o.waybill_ready and not o.needs_arrange
+    assert o.ref["label"] == ["att", 900]
+    assert src.get_waybill(o)[:4] == b"%PDF"
+    job = eng.wait(eng.start_print_one(o.key))  # prints even though Odoo has no tracking number yet
+    assert not job.error
+    assert o.key in eng.store.printed()
+
+
+def test_tiktok_waybill_in_a_differently_named_file_field(tmp_path):
+    fake = FakeOdoo()
+    tiktok_ready(fake)
+    for pk in fake.pickings.values():
+        pk.pop("tiktok_label_attachment_id")
+        pk["tiktok_shipping_label"] = False
+    fake.pickings[73]["tiktok_shipping_label"] = "12 kb"  # Odoo sends the size when bin_size is on
+
+    class Fake(FakeOdoo):
+        def __call__(self, model, method, *args, **kw):
+            if model == "stock.picking" and method == "fields_get":
+                d = super().__call__(model, method, *args, **kw)
+                d["tiktok_shipping_label"] = {"type": "binary"}
+                return d
+            if model == "stock.picking" and method == "read" and kw.get("fields") == ["tiktok_shipping_label"]:
+                return [{"id": 73, "tiktok_shipping_label": base64.b64encode(pdf_bytes()).decode()}]
+            return super().__call__(model, method, *args, **kw)
+    f2 = Fake()
+    f2.pickings = fake.pickings
+    src = OdooSource({}, rpc=f2, sleep=lambda s: None)
+    orders = {o.order_id: o for o in src.list_orders()}
+    o = orders["WH/OUT/00073"]
+    assert src.f_tt_label == "tiktok_shipping_label"
+    assert o.waybill_ready and o.ref["label"] == ["bin", "tiktok_shipping_label"]
+    assert src.get_waybill(o)[:4] == b"%PDF"
+    assert any(c[2] == [73] or c[3].get("context", {}).get("bin_size") for c in f2.calls
+               if c[0] == "stock.picking" and c[1] == "search_read")
+
+
+def test_odoo_check_reports_waybills_per_platform():
+    fake = FakeOdoo()
+    src = OdooSource({}, rpc=fake, sleep=lambda s: None)
+    w = {g["platform"]: g for g in src.check()["waybills"]}
+    assert w["shopee"]["total"] == 2 and w["shopee"]["found"] == 1
+    assert w["tiktok"]["total"] == 1 and w["tiktok"]["found"] == 0
+    assert w["tiktok"]["missing"] == ["WH/OUT/00073 (tiktok: confirmed)"]
+    assert "tiktok_label_attachment_id" in w["tiktok"]["fields"]

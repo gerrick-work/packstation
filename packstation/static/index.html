@@ -751,6 +751,9 @@ function renderSettings() {
       <td style="text-align:right">${x.count}</td><td>${x.listed ? yes : no}</td></tr>`).join("");
     const sal = r.sales.map(x => `<tr><td>${esc(x.company)}</td><td>${esc(x.team)}</td><td style="text-align:right">${x.orders}</td>
       <td style="text-align:right">${x.listed}</td><td style="text-align:right">${x.no_delivery}</td></tr>`).join("");
+    const wb = (r.waybills || []).map(x => `<tr><td>${esc(x.platform)}</td><td style="text-align:right">${x.total}</td>
+      <td style="text-align:right">${x.found}</td><td>${esc(Object.entries(x.where).map(([k, n]) => n + " " + k).join(", ") || "-")}</td>
+      <td>${esc(x.missing.join(", ") || "-")}</td><td class="hint">${esc(x.fields.join(", ") || "none found")}</td></tr>`).join("");
     $("#checkOut").innerHTML = `<p class="hint">Pack Station version ${esc(S.version)} · checked ${new Date().toLocaleTimeString()}<br>
       Companies this Odoo login can see: <b>${esc(r.companies.join(", ") || "only its main company")}</b></p>
       <h3>Sale orders, last ${r.days} days</h3>
@@ -758,7 +761,10 @@ function renderSettings() {
       <tbody>${sal || `<tr><td colspan="5" class="hint">No sale orders in Odoo in the last ${r.days} days.</td></tr>`}</tbody></table>
       <h3>Open transfers</h3>
       <table class="logtable"><thead><tr><th>Company</th><th>Operation</th><th>Type</th><th>Status</th><th>Count</th><th>Pack Station</th></tr></thead>
-      <tbody>${del || `<tr><td colspan="6" class="hint">No open transfers.</td></tr>`}</tbody></table>`;
+      <tbody>${del || `<tr><td colspan="6" class="hint">No open transfers.</td></tr>`}</tbody></table>
+      <h3>Waybills for the orders on screen</h3>
+      <table class="logtable"><thead><tr><th>Platform</th><th>Orders</th><th>Waybill found</th><th>Found as</th><th>No waybill (first 8)</th><th>Odoo label fields</th></tr></thead>
+      <tbody>${wb || `<tr><td colspan="6" class="hint">No Shopee or TikTok orders to pack.</td></tr>`}</tbody></table>`;
   };
   $("#brandSave").onclick = () => save({brand: $("#brandIn").value}, "Brand");
   $("#pinSave").onclick = () => save({pin: $("#pinIn").value}, "PIN");

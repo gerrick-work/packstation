@@ -16,6 +16,7 @@ import base64
 import re
 import socket
 import time
+import urllib.request
 import xmlrpc.client
 from datetime import datetime
 
@@ -133,7 +134,19 @@ class OdooSource(Source):
                          if "shopee" in n and f.get("type") == "many2one" and f.get("relation") == "ir.attachment"]
                 cands.sort(key=lambda n: ("label" not in n, n))
                 self.f_sp_label = cands[0] if cands else ""
+            if self.f_tt_label not in self._fields:  # connector versions name it differently
+                self.f_tt_label = next(iter(self._label_fields("tiktok")), self.f_tt_label)
         return self._fields
+
+    def _label_fields(self, platform: str) -> list[str]:
+        """Fields on the delivery that can hold a waybill: attachment links, files, or a URL."""
+        f = self._fields or {}
+        out = [n for n, d in f.items() if n.startswith(platform + "_")
+               and (d.get("relation") == "ir.attachment" or d.get("type") == "binary"
+                    or (d.get("type") == "char" and any(w in n for w in ("url", "link"))
+                        and any(w in n for w in ("label", "waybill", "awb", "document"))))]
+        out.sort(key=lambda n: (not any(w in n for w in ("label", "waybill", "awb")), n))
+        return out
 
     # ---- orders -----------------------------------------------------------------------
 
@@ -143,13 +156,15 @@ class OdooSource(Source):
                   self.f_tracking, self.f_tt_status, self.f_tt_label, self.f_sp_status, self.f_sp_label]
         platform_fields = [n for n in f if (n.startswith("tiktok_") or n.startswith("shopee_"))
                            and f[n].get("type") in ("char", "selection", "many2one", "integer")]
-        read = sorted({n for n in wanted + platform_fields if n and n in f})
+        read = sorted({n for n in wanted + platform_fields + self._label_fields("tiktok")
+                       + self._label_fields("shopee") if n and n in f})
         ctx = self.ctx()
+        bctx = dict(ctx, bin_size=True)
         if "company_id" in f:
             read.append("company_id")
         pickings = self._x("stock.picking", "search_read",
                            [("picking_type_code", "in", self.type_codes), ("state", "in", self.states)],
-                           fields=read, context=ctx)
+                           fields=read, context=bctx)
         move_ids = [m for p in pickings for m in p.get("move_ids", [])]
         moves = {m["id"]: m for m in self._x("stock.move", "read", move_ids,
                                              fields=["product_id", "product_uom_qty"], context=ctx)} if move_ids else {}
@@ -159,7 +174,69 @@ class OdooSource(Source):
         sale_ids = [p["sale_id"][0] for p in pickings if p.get("sale_id")]
         refs = {s["id"]: s.get(self.ref_field) or "" for s in self._x(
             "sale.order", "read", sale_ids, fields=[self.ref_field], context=ctx)} if sale_ids else {}
-        return [self._to_order(p, moves, prods, refs) for p in pickings]
+        found = self._attached_labels(pickings)
+        return [self._to_order(p, moves, prods, refs, found.get(p["id"])) for p in pickings]
+
+    _LABEL_WORDS = ("label", "waybill", "awb", "airway", "shipping", "consign", "tiktok", "shopee")
+
+    def _attached_labels(self, pickings: list[dict]) -> dict:
+        """Waybills the connector saved as plain attachments (on the delivery or its sale order)
+        instead of in a label field. Returns {picking id: attachment id}; PDFs whose name looks like
+        a label win, then the newest."""
+        need = [p for p in pickings if self._platform(p) and not self._field_label(p)]
+        if not need:
+            return {}
+        sale_of = {p["sale_id"][0]: p["id"] for p in need if p.get("sale_id")}
+        dom = ["|", "&", ("res_model", "=", "stock.picking"), ("res_id", "in", [p["id"] for p in need]),
+               "&", ("res_model", "=", "sale.order"), ("res_id", "in", list(sale_of) or [0]),
+               ("mimetype", "in", ["application/pdf", "image/png", "image/jpeg"])]
+        try:
+            atts = self._x("ir.attachment", "search_read", dom,
+                           fields=["id", "name", "res_model", "res_id", "mimetype", "create_date"],
+                           order="create_date desc, id desc", context=self.ctx())
+        except Exception:  # no right to read attachments: fall back to the label fields only
+            return {}
+        best: dict[int, tuple] = {}
+        for a in atts:
+            pid = a["res_id"] if a["res_model"] == "stock.picking" else sale_of.get(a["res_id"])
+            if not pid:
+                continue
+            name = (a.get("name") or "").lower()
+            looks = any(w in name for w in self._LABEL_WORDS)
+            if a["res_model"] == "sale.order" and not looks:
+                continue  # a sale order's quotation PDF is not a waybill
+            rank = (looks, a["res_model"] == "stock.picking", a.get("mimetype") == "application/pdf")
+            if pid not in best or rank > best[pid][0]:
+                best[pid] = (rank, a["id"])
+        return {pid: aid for pid, (_, aid) in best.items()}
+
+    def _field_label(self, p: dict):
+        """The waybill held in one of the delivery's label fields, as a ref: ("att", id), ("bin", field)
+        or ("url", link). None when no field holds one."""
+        platform = self._platform(p)
+        if not platform:
+            return None
+        names = self._label_fields(platform)
+        main = self.f_tt_label if platform == "tiktok" else self.f_sp_label
+        if main in names:
+            names.remove(main)
+            names.insert(0, main)
+        if platform == "shopee" and self.f_sp_status in p and p.get(self.f_sp_status) not in ("stored", False, None, ""):
+            return None  # Shopee is still preparing the label; an older one may be stale
+        f = self._fields or {}
+        for n in names:
+            v = p.get(n)
+            if not v:
+                continue
+            d = f.get(n, {})
+            if d.get("relation") == "ir.attachment":
+                if isinstance(v, list) and v and isinstance(v[0], int):
+                    return ("att", v[0] if d.get("type") == "many2one" else v[-1])
+            elif d.get("type") == "binary":
+                return ("bin", n)
+            elif isinstance(v, str) and v.startswith("http"):
+                return ("url", v)
+        return None
 
     def check(self, days: int = 14) -> dict:
         """Where are the orders? Read only; shown on the Settings screen to explain missing orders.
@@ -207,12 +284,36 @@ class OdooSource(Source):
             g[1] += listable
             g[2] += no_delivery
         return {
+            "waybills": self._check_waybills(),
             "companies": companies,
             "deliveries": deliveries,
             "sales": [{"company": c, "team": t, "orders": n, "listed": l, "no_delivery": nd}
                       for (c, t), (n, l, nd) in sorted(sales.items())],
             "days": days,
         }
+
+    def _check_waybills(self) -> list[dict]:
+        """Per platform: how many to-pack deliveries have a waybill Pack Station can fetch, and where
+        it was found. Lists the connector's label fields so a missing one can be spotted."""
+        try:
+            orders = self.list_orders()
+        except PackError:
+            return []
+        out = {}
+        for o in orders:
+            if not o.platform:
+                continue
+            g = out.setdefault(o.platform, {"platform": o.platform, "total": 0, "found": 0, "missing": [],
+                                            "where": {}, "fields": self._label_fields(o.platform)})
+            g["total"] += 1
+            lab = o.ref.get("label")
+            if lab:
+                g["found"] += 1
+                kind = {"att": "file", "bin": "file field", "url": "link"}[lab[0]]
+                g["where"][kind] = g["where"].get(kind, 0) + 1
+            elif len(g["missing"]) < 8:
+                g["missing"].append(f"{o.order_id} ({o.status})")
+        return list(out.values())
 
     def _platform(self, p: dict) -> str:
         def truthy(v):
@@ -224,7 +325,7 @@ class OdooSource(Source):
             return "shopee"
         return ""
 
-    def _to_order(self, p: dict, moves: dict, prods: dict, refs: dict) -> Order:
+    def _to_order(self, p: dict, moves: dict, prods: dict, refs: dict, attached: int | None = None) -> Order:
         items = []
         for mid in p.get("move_ids", []):
             m = moves.get(mid)
@@ -235,19 +336,16 @@ class OdooSource(Source):
                               qty=int(round(m["product_uom_qty"]))))
         when = p.get("date_deadline") or p.get("scheduled_date")
         platform = self._platform(p)
-        label_id = None
+        label = self._field_label(p) or (("att", attached) if attached else None)
         needs_arrange = False
         status = "ready"
         if platform == "tiktok":
-            label_id = (p.get(self.f_tt_label) or [None])[0] if p.get(self.f_tt_label) else None
             tt = p.get(self.f_tt_status) or ""
             status = f"tiktok: {tt}" if tt else "tiktok"
-            needs_arrange = not label_id and tt in self.tt_arrange_states
+            needs_arrange = not label and tt in self.tt_arrange_states
         elif platform == "shopee":
             sp = p.get(self.f_sp_status) or ""
             status = f"shopee label: {sp}" if sp else "shopee"
-            if sp == "stored" and self.f_sp_label and p.get(self.f_sp_label):
-                label_id = p[self.f_sp_label][0]
         tracking = p.get(self.f_tracking) or None
         if not tracking and platform:  # connector's own tracking field, e.g. shopee_tracking_number
             tracking = next((v for k, v in p.items() if k.startswith(platform + "_") and "tracking" in k
@@ -262,10 +360,11 @@ class OdooSource(Source):
             tracking=tracking,
             needs_arrange=needs_arrange,
             has_waybill=bool(platform),
-            waybill_ready=bool(label_id),
+            waybill_ready=bool(label),
             platform=platform,
             odoo_picking_id=p["id"],
-            ref={"platform_ref": str(ref).strip(), "origin": p.get("origin") or "", "label_attachment_id": label_id},
+            ref={"platform_ref": str(ref).strip(), "origin": p.get("origin") or "", "label": list(label) if label else None,
+                 "label_attachment_id": label[1] if label and label[0] == "att" else None},
         )
 
     def _reload(self, order: Order) -> Order:
@@ -273,21 +372,43 @@ class OdooSource(Source):
         read = [n for n in ["name", "move_ids", "sale_id", "scheduled_date", "date_deadline", self.f_tracking,
                             self.f_tt_status, self.f_tt_label, self.f_sp_status, self.f_sp_label] if n and n in f]
         read += [n for n in f if (n.startswith("tiktok_") or n.startswith("shopee_")) and "tracking" in n]
-        p = self._x("stock.picking", "read", [order.odoo_picking_id], fields=read, context=self.ctx())[0]
-        fresh = self._to_order(p, {}, {}, {})
+        read += [n for n in self._label_fields("tiktok") + self._label_fields("shopee") if n not in read]
+        p = self._x("stock.picking", "read", [order.odoo_picking_id], fields=read,
+                    context=dict(self.ctx(), bin_size=True))[0]
+        fresh = self._to_order(p, {}, {}, {}, self._attached_labels([p]).get(p["id"]))
         fresh.items, fresh.ref["platform_ref"] = order.items, order.ref.get("platform_ref", "")
         return fresh
 
     # ---- waybills ---------------------------------------------------------------------
 
     def get_waybill(self, order: Order) -> bytes:
-        att = order.ref.get("label_attachment_id")
-        if not att:
+        label = order.ref.get("label")
+        if not label and order.ref.get("label_attachment_id"):
+            label = ["att", order.ref["label_attachment_id"]]
+        if not label:
             raise PackError("WAYBILL-MISSING", "fetching waybill from Odoo")
-        rows = self._x("ir.attachment", "read", [att], fields=["datas", "mimetype", "name"], context=self.ctx())
-        if not rows or not rows[0].get("datas"):
-            raise PackError("WAYBILL-MISSING", "fetching waybill from Odoo", "attachment is empty")
-        return base64.b64decode(rows[0]["datas"])
+        kind, where = label
+        step = "fetching waybill from Odoo"
+        if kind == "att":
+            rows = self._x("ir.attachment", "read", [where], fields=["datas", "mimetype", "name"], context=self.ctx())
+            data = rows[0].get("datas") if rows else None
+            if not data:
+                raise PackError("WAYBILL-MISSING", step, "attachment is empty")
+            return base64.b64decode(data)
+        if kind == "bin":
+            rows = self._x("stock.picking", "read", [order.odoo_picking_id], fields=[where], context=self.ctx())
+            data = rows[0].get(where) if rows else None
+            if not data:
+                raise PackError("WAYBILL-MISSING", step, f"{where} is empty")
+            return base64.b64decode(data)
+        try:  # a link the platform gave the connector
+            with urllib.request.urlopen(where, timeout=60) as r:
+                data = r.read()
+        except OSError as e:
+            raise PackError("WAYBILL-MISSING", "downloading waybill", str(e)) from e
+        if not data:
+            raise PackError("WAYBILL-MISSING", "downloading waybill", "empty download")
+        return data
 
     # ---- TikTok: arrange shipment -------------------------------------------------------
 
