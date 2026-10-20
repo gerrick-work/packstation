@@ -33,6 +33,14 @@ def build_sources(cfg: dict) -> list[Source]:
         sources.append(ShopeeSource(cfg["shopee"], data_dir))
     if cfg.get("tiktok", {}).get("enabled"):
         sources.append(TikTokSource(cfg["tiktok"], data_dir))
+    from .manual import ManualSource
+    sources.append(ManualSource(data_dir))   # data/manual_orders.json; empty unless orders were added by hand
     if cfg.get("odoo", {}).get("enabled"):
-        sources.append(OdooSource(cfg["odoo"]))
+        odoo = OdooSource(cfg["odoo"])
+        sources.append(odoo)
+        # Shopee cross-border shops (e.g. Singapore) that Odoo's Shopee connector doesn't fetch
+        regions = cfg["odoo"].get("shopee_sip_regions") or []
+        if regions:
+            from .shopee_sip import ShopeeSipSource
+            sources.append(ShopeeSipSource(odoo, regions, data_dir=data_dir))
     return sources

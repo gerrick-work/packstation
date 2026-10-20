@@ -25,6 +25,7 @@ tiktok_ship_method = "dropoff"          # "dropoff" or "pickup" when Print all b
 refresh_crons = [73, 77, 74]            # Shopee sync orders, TikTok sync orders, Shopee sync shipping labels
 note_when_printed = true                # post "printed" on the Odoo delivery (only when a waybill printed)
 platform_ref_field = "client_order_ref" # only used when Shopee/TikTok below are also enabled
+shopee_sip_regions = []                # e.g. ["SG"]: also print orders of the Shopee cross-border shop Odoo doesn't fetch
 # placeholder_products = ["TikTok Shop Sale"]  # catch-all products whose real item name is on the sale line
                                             # (names like "TikTok Shop Sale" / "Shopee Sale" are found anyway)
 

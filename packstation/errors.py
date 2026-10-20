@@ -11,7 +11,10 @@ CODES = {
     "ODOO-AUTH": "Odoo refused the login. Check the Odoo email and API key in Settings.",
     "ODOO-NET": "Can't reach Odoo. Check this Mac's internet connection.",
     "ODOO-CRON": "Odoo couldn't run its Shopee/TikTok sync.",
+    "ODOO-VALIDATE": "Packed here, but Odoo didn't validate the delivery. Open it in Odoo and press Validate.",
+    "ODOO-ERROR": "Odoo answered with an error. The detail says what it was.",
     "WAYBILL-MISSING": "No waybill from Shopee/TikTok yet. Press Refresh, or check the order in Seller Centre.",
+    "SHOPEE-SG": "Couldn't read the Shopee Singapore shop. The detail says why; Odoo's own sync is not affected.",
     "TIKTOK-ARRANGE": "Couldn't book the TikTok courier, or TikTok hasn't sent the label yet.",
     "BT-NOTFOUND": "Printer not found. Is it switched on, and is Label Expert on the phone closed?",
     "BT-PERMISSION": "This Mac hasn't allowed Bluetooth for Pack Station. System Settings > Privacy & Security > Bluetooth.",
@@ -58,7 +61,7 @@ def classify(exc: BaseException, step: str) -> PackError:
     if isinstance(exc, xmlrpc.client.Fault):
         if "access" in low and ("denied" in low or "error" in low) or "session expired" in low:
             return PackError("ODOO-AUTH", step, msg[:200])
-        return PackError("ODOO-CRON" if "cron" in step.lower() else "ODOO-NET", step, msg[:200])
+        return PackError("ODOO-CRON" if "cron" in step.lower() else "ODOO-ERROR", step, msg[:200])
     if isinstance(exc, (ConnectionError, socket.timeout, socket.gaierror, TimeoutError, OSError)) and "odoo" in step.lower():
         return PackError("ODOO-NET", step, msg[:200])
     if "bluetooth" in step.lower() or "printer" in step.lower():

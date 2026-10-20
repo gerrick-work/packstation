@@ -59,6 +59,9 @@ class OdooSource(Source):
         self.f_sp_status = cfg.get("shopee_status_field", "shopee_label_status")
         self.f_sp_label = cfg.get("shopee_label_field", "")  # found automatically when empty
         self.tt_arrange_states = cfg.get("tiktok_arrange_states", ["confirmed"])
+        # Only deliveries whose sale order is in these sales teams (empty list = all). Keeps bulk B2B
+        # orders (e.g. 400 corporate gift sets) off the label printer, and says which platform it is.
+        self.teams = {t.lower() for t in cfg.get("only_sales_teams", ["Shopee", "TikTok Shop"])}
         # Which delivery statuses count as "to pack". Odoo: assigned = Ready, confirmed = Waiting,
         # waiting = Waiting another operation. Settings can add "Waiting" for warehouses without
         # reserved stock (e.g. a Singapore warehouse fulfilled from Malaysia).
@@ -106,6 +109,8 @@ class OdooSource(Source):
             raise
         except xmlrpc.client.Fault as e:
             low = e.faultString.lower()
+            if "cannot marshal none" in low:
+                return None  # the button worked; Odoo just can't send back its empty reply over XML-RPC
             if "access" in low or "not allowed" in low or "permission" in low:
                 raise PackError("ODOO-AUTH" if step == "reading Odoo" else "ODOO-CRON", step,
                                 e.faultString.strip().splitlines()[-1][:200]) from e
@@ -178,11 +183,18 @@ class OdooSource(Source):
         prods = {p["id"]: p for p in self._x("product.product", "read", prod_ids,
                                              fields=["default_code", "display_name"], context=ctx)} if prod_ids else {}
         self._real_items(moves, prods, ctx)
-        sale_ids = [p["sale_id"][0] for p in pickings if p.get("sale_id")]
-        sales = self._x("sale.order", "read", sale_ids, fields=[self.ref_field, "amount_total", "currency_id"],
-                        context=ctx) if sale_ids else []
-        refs = {s["id"]: s.get(self.ref_field) or "" for s in sales}
-        totals = {s["id"]: (s.get("amount_total"), (s.get("currency_id") or [0, ""])[1]) for s in sales}
+        sale_ids = list({p["sale_id"][0] for p in pickings if p.get("sale_id")})
+        sales = {s["id"]: s for s in self._x("sale.order", "read", sale_ids,
+                                             fields=[self.ref_field, "team_id", "order_line", "amount_total",
+                                                     "currency_id"], context=ctx)} if sale_ids else {}
+        refs = {sid: s.get(self.ref_field) or "" for sid, s in sales.items()}
+        totals = {sid: (s.get("amount_total"), (s.get("currency_id") or [0, ""])[1]) for sid, s in sales.items()}
+        self._team = {sid: (s["team_id"][1] if s.get("team_id") else "") for sid, s in sales.items()}
+        if self.teams:
+            pickings = [p for p in pickings if p.get("sale_id")
+                        and self._team.get(p["sale_id"][0], "").lower() in self.teams]
+        self._sold = self._sold_items(sales)
+        self._sp_files = self._shopee_files([p["id"] for p in pickings])
         found = self._attached_labels(pickings)
         return [self._to_order(p, moves, prods, refs, found.get(p["id"]), totals) for p in pickings]
 
@@ -265,6 +277,48 @@ class OdooSource(Source):
                 return ("url", v)
         return None
 
+    def _sold_items(self, sales: dict) -> dict[int, list[Item]]:
+        """What the customer bought (bottles), per sale order. Delivery moves can hold raw-material
+        grams instead when products are kits (0.3 g Labdanum for a 3 g bottle), so they're a fallback."""
+        line_ids = [lid for s in sales.values() for lid in s.get("order_line", [])]
+        if not line_ids:
+            return {}
+        lines = self._x("sale.order.line", "read", line_ids,
+                        fields=["order_id", "product_id", "product_uom_qty", "display_type", "is_delivery", "name"],
+                        context=self.ctx())
+        pids = list({l["product_id"][0] for l in lines if l.get("product_id")})
+        prods = {pp["id"]: pp for pp in self._x("product.product", "read", pids,
+                                                 fields=["default_code", "display_name", "type"], context=self.ctx())} if pids else {}
+        out: dict[int, list[Item]] = {}
+        for l in lines:
+            if l.get("display_type") or l.get("is_delivery") or not l.get("product_id"):
+                continue
+            prod = prods.get(l["product_id"][0], {})
+            qty = int(round(l.get("product_uom_qty") or 0))
+            if prod.get("type") == "service" or qty <= 0:
+                continue
+            sku, name = prod.get("default_code") or "", prod.get("display_name", "")
+            if self.is_placeholder(prod):  # "TikTok Shop Sale": the real item is in the line's description
+                real = _line_item(l.get("name") or "", name)
+                if real[1]:
+                    sku, name = real
+            out.setdefault(l["order_id"][0], []).append(Item(sku=sku, name=name, qty=qty))
+        return out
+
+    def _shopee_files(self, picking_ids: list[int]) -> dict[int, int]:
+        """The Shopee connector stores the waybill as an attachment named Shopee_Label_<delivery>.pdf
+        (there is no attachment field on the delivery). Newest wins."""
+        if not picking_ids or self.f_sp_label:
+            return {}
+        atts = self._x("ir.attachment", "search_read",
+                       [("res_model", "=", "stock.picking"), ("res_id", "in", picking_ids),
+                        ("name", "ilike", "shopee"), ("mimetype", "=", "application/pdf")],
+                       fields=["res_id"], order="id desc", context=self.ctx())
+        out: dict[int, int] = {}
+        for a in atts:
+            out.setdefault(a["res_id"], a["id"])
+        return out
+
     def check(self, days: int = 14) -> dict:
         """Where are the orders? Read only; shown on the Settings screen to explain missing orders.
         - companies: the Odoo companies this login can see
@@ -301,11 +355,14 @@ class OdooSource(Source):
         picks = {p["id"]: p for p in self._x("stock.picking", "read", pick_ids,
                                              fields=["state", "picking_type_code"], context=ctx)} if pick_ids else {}
         sales: dict[tuple, list] = {}
+        team_skip: dict[tuple, bool] = {}
         for o in orders:
             key = ((o.get("company_id") or [0, "?"])[1], (o.get("team_id") or [0, "No sales team"])[1])
-            listable = any(picks.get(i, {}).get("picking_type_code") in self.type_codes
+            team_ok = not self.teams or key[1].lower() in self.teams   # B2B teams are left off on purpose
+            listable = team_ok and any(picks.get(i, {}).get("picking_type_code") in self.type_codes
                            and picks.get(i, {}).get("state") in self.states for i in o.get("picking_ids") or [])
             no_delivery = not o.get("picking_ids")
+            team_skip[key] = not team_ok
             g = sales.setdefault(key, [0, 0, 0])
             g[0] += 1
             g[1] += listable
@@ -314,8 +371,10 @@ class OdooSource(Source):
             "waybills": self._check_waybills(),
             "companies": companies,
             "deliveries": deliveries,
-            "sales": [{"company": c, "team": t, "orders": n, "listed": l, "no_delivery": nd}
+            "sales": [{"company": c, "team": t, "orders": n, "listed": l, "no_delivery": nd,
+                       "team_skipped": team_skip.get((c, t), False)}
                       for (c, t), (n, l, nd) in sorted(sales.items())],
+            "teams": sorted(self.teams),
             "days": days,
         }
 
@@ -343,19 +402,26 @@ class OdooSource(Source):
         return list(out.values())
 
     def _platform(self, p: dict) -> str:
+        team = getattr(self, "_team", {}).get(p["sale_id"][0], "").lower() if p.get("sale_id") else ""
+        if "tiktok" in team:
+            return "tiktok"
+        if "shopee" in team:
+            return "shopee"
         def truthy(v):
             return v not in (False, None, "", 0)
         if truthy(p.get(self.f_tt_status)) or truthy(p.get(self.f_tt_label)) or any(
                 truthy(v) for k, v in p.items() if k.startswith("tiktok_")):
             return "tiktok"
-        if truthy(p.get(self.f_sp_status)) or any(truthy(v) for k, v in p.items() if k.startswith("shopee_")):
+        sp = p.get(self.f_sp_status)
+        if (truthy(sp) and sp != "not available") or truthy(p.get("shopee_order_ref")):
             return "shopee"
         return ""
 
     def _to_order(self, p: dict, moves: dict, prods: dict, refs: dict, attached: int | None = None,
                   totals: dict | None = None) -> Order:
-        items = []
-        for mid in p.get("move_ids", []):
+        sold = getattr(self, "_sold", {}).get(p["sale_id"][0]) if p.get("sale_id") else None
+        items = list(sold) if sold else []
+        for mid in ([] if items else p.get("move_ids", [])):
             m = moves.get(mid)
             if not m or not m.get("product_id"):
                 continue
@@ -375,6 +441,10 @@ class OdooSource(Source):
         elif platform == "shopee":
             sp = p.get(self.f_sp_status) or ""
             status = f"shopee label: {sp}" if sp else "shopee"
+            if sp and sp != "stored":
+                label = None  # Shopee is still preparing the label; an older file may be stale
+            elif not label and getattr(self, "_sp_files", {}).get(p["id"]):
+                label = ("att", self._sp_files[p["id"]])
         tracking = p.get(self.f_tracking) or None
         if not tracking and platform:  # connector's own tracking field, e.g. shopee_tracking_number
             tracking = next((v for k, v in p.items() if k.startswith(platform + "_") and "tracking" in k
@@ -423,8 +493,11 @@ class OdooSource(Source):
         kind, where = label
         step = "fetching waybill from Odoo"
         if kind == "att":
-            rows = self._x("ir.attachment", "read", [where], fields=["datas", "mimetype", "name"], context=self.ctx())
-            data = rows[0].get("datas") if rows else None
+            if getattr(self, "_att_field", None) is None:
+                have = self._x("ir.attachment", "fields_get", attributes=["type"], context=self.ctx())
+                self._att_field = "datas" if "datas" in have else "raw"   # Odoo 19.4+ renamed it
+            rows = self._x("ir.attachment", "read", [where], fields=[self._att_field, "mimetype", "name"], context=self.ctx())
+            data = rows[0].get(self._att_field) if rows else None
             if not data:
                 raise PackError("WAYBILL-MISSING", step, "attachment is empty")
             return base64.b64decode(data)
@@ -455,11 +528,13 @@ class OdooSource(Source):
                 self._run_wizard(action, method, step)
             self._x("stock.picking", "action_tiktok_sync_pickings", [pid], step=step, context=self.ctx())
         except PackError as e:
-            if e.code in ("ODOO-NET", "ODOO-AUTH"):
+            if e.code == "ODOO-AUTH":
                 raise
-            raise PackError("TIKTOK-ARRANGE", step, e.detail or e.code) from e
+            if "already scheduled" not in (e.detail or "").lower():
+                raise PackError("TIKTOK-ARRANGE", step, e.detail or e.code) from e
         except xmlrpc.client.Fault as e:
-            raise PackError("TIKTOK-ARRANGE", step, e.faultString.strip().splitlines()[-1][:200]) from e
+            if "already scheduled" not in e.faultString.lower():  # booked earlier: just fetch the label
+                raise PackError("TIKTOK-ARRANGE", step, e.faultString.strip().splitlines()[-1][:200]) from e
         for _ in range(8):  # TikTok issues the label a few seconds after the booking
             fresh = self._reload(order)
             if fresh.waybill_ready:
@@ -538,6 +613,28 @@ class OdooSource(Source):
         if picking_ids:
             self._x("stock.picking", "action_tiktok_sync_pickings", picking_ids, step="syncing TikTok deliveries",
                     context=self.ctx())
+
+    def validate(self, picking_id: int) -> None:
+        """Validate the delivery in Odoo (stock leaves, connector marks it shipped). Raises ODOO-VALIDATE.
+        Already-validated deliveries are fine. A wizard (backorder, missing quantities) is not answered
+        automatically: that needs a person in Odoo."""
+        step = "validating the Odoo delivery"
+        rows = self._x("stock.picking", "read", [picking_id], fields=["state"], step=step, context=self.ctx())
+        if rows and rows[0].get("state") == "done":
+            return
+        try:
+            res = self._x("stock.picking", "button_validate", [picking_id], step=step, context=self.ctx())
+        except PackError as e:
+            if e.code == "ODOO-AUTH":
+                raise
+            raise PackError("ODOO-VALIDATE", step, e.detail or e.code) from e
+        except xmlrpc.client.Fault as e:
+            raise PackError("ODOO-VALIDATE", step, e.faultString.strip().splitlines()[-1][:200]) from e
+        if isinstance(res, dict) and res.get("res_model"):
+            raise PackError("ODOO-VALIDATE", step, f"Odoo wants a decision first ({res.get('name') or res['res_model']})")
+        rows = self._x("stock.picking", "read", [picking_id], fields=["state"], step=step, context=self.ctx())
+        if rows and rows[0].get("state") != "done":
+            raise PackError("ODOO-VALIDATE", step, f"delivery is still '{rows[0].get('state')}'")
 
     def note_printed(self, picking_id: int, text: str) -> None:
         if self.post_note:

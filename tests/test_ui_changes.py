@@ -8,7 +8,10 @@ from packstation.models import Item, Order
 from packstation.sources.demo import DemoSource
 from packstation.sources.odoo import OdooSource
 
-from test_fixes import FakeOdoo, by_name, write_cfg
+try:
+    from tests.test_fixes import FakeOdoo, LiveShapedOdoo, by_name, write_cfg
+except ImportError:
+    from test_fixes import FakeOdoo, LiveShapedOdoo, by_name, write_cfg
 
 
 def demo_engine(tmp_path):
@@ -35,8 +38,8 @@ def test_odoo_orders_carry_the_sale_order_total(tmp_path):
     def with_totals(model, method, *a, **kw):
         if model == "sale.order" and method == "read":
             assert {"amount_total", "currency_id"} <= set(kw["fields"])
-            return [{"id": i, "client_order_ref": f"PLAT{i}", "amount_total": 88.5, "currency_id": [1, "MYR"]}
-                    for i in a[0]]
+            return [dict(s, amount_total=88.5, currency_id=[1, "MYR"], team_id=s.get("team_id") or [1, "Shopee"])
+                    for s in real(model, method, *a, **kw)]
         return real(model, method, *a, **kw)
 
     eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=with_totals, sleep=lambda s: None)])
@@ -166,8 +169,44 @@ def test_print_all_counts_bundle_labels(tmp_path):
 
 # ---------------------------------------------------------------- "TikTok Shop Sale" catch-all product
 
-def placeholder_odoo(line_name):
-    """FakeOdoo where WH/OUT/00073's TikTok item landed on Odoo's catch-all "TikTok Shop Sale"."""
+class CatchAllOdoo(LiveShapedOdoo):
+    """Live-shaped Odoo where the TikTok order S00073's item landed on the catch-all "TikTok Shop Sale"."""
+
+    def __init__(self, line_name):
+        super().__init__()
+        self.line_name = line_name
+
+    def __call__(self, model, method, *args, **kw):
+        if model == "sale.order.line" and method == "read":
+            self.calls.append((model, method, args, kw))
+            return [dict(l, name=self.line_name if l["id"] == 90 else f"Bottle {900 + l['id']} 3g")
+                    for l in super().__call__(model, method, *args, **kw)]
+        if model == "product.product" and method == "read" and 990 in args[0]:
+            return [dict(p, default_code=False, display_name="TikTok Shop Sale") if p["id"] == 990 else p
+                    for p in super().__call__(model, method, *args, **kw)]
+        return super().__call__(model, method, *args, **kw)
+
+
+def test_catch_all_product_uses_the_sale_line_item_name():
+    fake = CatchAllOdoo("TikTok Shop Sale\n[ML-HED-BV] Hedione (15x2) Best Value")
+    orders = {o.order_id: o for o in OdooSource({}, rpc=fake).list_orders()}
+    item = orders["WH/OUT/00073"].items[0]
+    assert (item.sku, item.name) == ("ML-HED-BV", "Hedione (15x2) Best Value")
+    assert orders["WH/OUT/00080"].items[0].name == "Bottle 1000 3g"               # real products untouched
+    data, _ = Catalog(None, "atlas origins").lookup(item)
+    assert (data.title, data.size, data.bottles) == ("Hedione", "15g", 2)
+
+
+def test_catch_all_product_without_a_name_is_flagged(tmp_path):
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=CatchAllOdoo("TikTok Shop Sale"))])
+    eng.scan()
+    o = by_name(eng)["WH/OUT/00073"]
+    assert o.items[0].name == "TikTok Shop Sale"
+    assert "Odoo has no product name for: TikTok Shop Sale" in eng.missing_info(o)
+
+
+def test_catch_all_product_on_delivery_moves_uses_the_sale_line(tmp_path):
+    """Fallback when the sale order's lines can't be read: the delivery move's sale line."""
     fake = FakeOdoo()
     real = fake.__call__
 
@@ -179,31 +218,14 @@ def placeholder_odoo(line_name):
                     for p in real(model, method, *a, **kw)]
         if model == "sale.order.line" and method == "read":
             fake.calls.append((model, method, a, kw))
-            return [{"id": i, "name": line_name} for i in a[0]]
+            return [{"id": i, "name": "Hedione (15x2) Best Value"} for i in a[0]]
         return real(model, method, *a, **kw)
 
-    return fake, rpc
-
-
-def test_catch_all_product_uses_the_sale_line_item_name(tmp_path):
-    fake, rpc = placeholder_odoo("TikTok Shop Sale\n[ML-HED-BV] Hedione (15x2) Best Value")
-    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=rpc, sleep=lambda s: None)])
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({"only_sales_teams": []}, rpc=rpc, sleep=lambda s: None)])
     eng.scan()
-    item = by_name(eng)["WH/OUT/00073"].items[0]
-    assert (item.sku, item.name) == ("ML-HED-BV", "Hedione (15x2) Best Value")
-    assert by_name(eng)["WH/OUT/00080"].items[0].name == "Linalool 102 3g"   # real products untouched
+    assert by_name(eng)["WH/OUT/00073"].items[0].name == "Hedione (15x2) Best Value"
     lines = [c for c in fake.calls if c[0] == "sale.order.line"]
     assert len(lines) == 1 and lines[0][2][0] == [701]                        # only the catch-all line read
-    data, _ = eng.catalog.lookup(item)
-    assert (data.title, data.size, data.bottles) == ("Hedione", "15g", 2)
-
-
-def test_catch_all_product_without_a_name_is_flagged(tmp_path):
-    _, rpc = placeholder_odoo("TikTok Shop Sale")
-    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=rpc, sleep=lambda s: None)])
-    eng.scan()
-    o = by_name(eng)["WH/OUT/00073"]
-    assert "Odoo has no product name for: TikTok Shop Sale" in eng.missing_info(o)
 
 
 def test_item_without_sku_matches_the_label_list_by_name(tmp_path):
