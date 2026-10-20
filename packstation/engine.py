@@ -275,12 +275,12 @@ class Engine:
             out.append("no waybill (not a Shopee/TikTok order)")
         elif o.waybill_missing:
             out.append("no waybill yet")
-        elif not o.tracking and not o.needs_arrange:
+        elif not o.tracking and o.waybill_ready:
             out.append("no tracking number")
         from .sources.odoo import PLACEHOLDER_RE
         vague = [i.name for i in o.items if PLACEHOLDER_RE.match(i.name)]
         if vague:
-            out.append("Odoo has no product name for: " + ", ".join(vague))
+            out.append("product unknown (Odoo and TikTok didn't say which): " + ", ".join(vague))
         sizeless = [self.catalog.lookup(i)[0].title for i in o.items
                     if i.name not in vague and not self.catalog.lookup(i)[0].size]
         if sizeless:
@@ -304,14 +304,13 @@ class Engine:
             return "waybill_missing"
         if self.held(o):
             return "held"
-        if o.needs_arrange:
-            return "arrange"
         return "ready"
 
     def pending(self, include_arrange: bool = False) -> list[Order]:
         printed = self.store.printed()
-        todo = [o for o in self.orders if o.key not in printed and not o.waybill_missing and not self.held(o)
-                and (include_arrange or not o.needs_arrange)]
+        # Orders without a waybill are included: printing asks Shopee/TikTok for it (Odoo orders).
+        todo = [o for o in self.orders if o.key not in printed and not self.held(o)
+                and (not o.waybill_missing or o.source == "odoo")]
         if self.cfg.get("app", {}).get("only_due_today"):
             end = datetime.now().replace(hour=23, minute=59, second=59)
             todo = [o for o in todo if not o.ship_by or o.ship_by <= end]
@@ -324,7 +323,7 @@ class Engine:
         return {
             "ready": [o.key for o in ready],
             "labels": sum(self.catalog.label_count(o) for o in ready),
-            "arrange": [o.key for o in unprinted if o.needs_arrange and not self.held(o)],
+            "arrange": [],   # printing gets the waybill itself now (books the shipment if needed)
             "missing": [o.key for o in unprinted if o.waybill_missing],
             "held": [o.key for o in unprinted if self.held(o)],
             "ship_method": self.ship_method,
@@ -403,15 +402,19 @@ class Engine:
         tag = f"Order #{code}" if code else f"Order {order.order_id}"
         prog = {"step": "starting", "sent": False}
         try:
+            from .sources.odoo import PLACEHOLDER_RE
+            vague = [i.name for i in order.items if PLACEHOLDER_RE.match(i.name)]
+            if vague:   # never print "TikTok Shop Sale" on a bottle
+                raise PackError("PRODUCT-UNKNOWN", "reading the order's products", ", ".join(vague))
             if order.has_waybill:
-                if order.needs_arrange:
-                    if not arrange_ok:
-                        raise PackError("TIKTOK-ARRANGE", "booking courier", "not confirmed on screen")
-                    prog["step"] = "booking TikTok courier"
+                if not order.waybill_ready:
+                    prog["step"] = "getting the waybill from Shopee/TikTok"
                     if job:
-                        job.current = f"{tag}: booking courier"
-                    order = (src.arrange(order, self.ship_method) if isinstance(src, OdooSource)
-                             else src.arrange(order))
+                        job.current = f"{tag}: getting waybill"
+                    if isinstance(src, OdooSource):
+                        order = src.ensure_waybill(order, self.ship_method)
+                    elif order.needs_arrange:
+                        order = src.arrange(order)
                     self._replace_order(order)
                     code = order.match_code
                     tag = f"Order #{code}" if code else f"Order {order.order_id}"
@@ -523,11 +526,12 @@ class Engine:
             job.error = bad[0].error
 
     def start_print_all(self, arrange: bool = False) -> Job:
-        """Print every pending order. Orders needing a TikTok courier booking are included only when
-        `arrange` (the user confirmed booking on screen). Waybill-missing orders are reported, not printed."""
-        orders = self.pending(include_arrange=arrange)
+        """Print every pending order, getting missing waybills straight from Shopee/TikTok on the way.
+        Orders that still can't get one are reported, not printed. (`arrange` is ignored: kept for old screens.)"""
+        orders = self.pending()
         printed = self.store.printed()
-        missing = [o for o in self.orders if o.waybill_missing and o.key not in printed]
+        pend = {o.key for o in orders}
+        missing = [o for o in self.orders if o.waybill_missing and o.key not in printed and o.key not in pend]
         held = [o for o in self.orders if self.held(o) and o.key not in printed]
 
         def work(job: Job):
@@ -539,7 +543,7 @@ class Engine:
                 err = PackError("INFO-MISSING", "checking order", "; ".join(self.missing_info(o)))
                 job.results.append(Result(o.key, False, err.text, error=err.as_dict()))
                 self.log.add("error", "Skipped: " + err.text, err.code, o.key)
-            self._run_orders(job, orders, arrange)
+            self._run_orders(job, orders, True)
             if missing:
                 job.summary += f"; {len(missing)} waiting for a waybill"
             if held:

@@ -15,7 +15,11 @@ CODES = {
     "ODOO-ERROR": "Odoo answered with an error. The detail says what it was.",
     "WAYBILL-MISSING": "No waybill from Shopee/TikTok yet. Press Refresh, or check the order in Seller Centre.",
     "SHOPEE-SG": "Couldn't read the Shopee Singapore shop. The detail says why; Odoo's own sync is not affected.",
-    "TIKTOK-ARRANGE": "Couldn't book the TikTok courier, or TikTok hasn't sent the label yet.",
+    "TIKTOK-ARRANGE": "TikTok hasn't sent the waybill yet. Press Refresh in a minute.",
+    "TIKTOK-API": "Couldn't ask TikTok directly. The detail says why; Odoo's own sync is not affected.",
+    "PRODUCT-UNKNOWN": "Odoo filed this item as \"TikTok Shop Sale\" and TikTok didn't say which product it is. "
+                       "Nothing was printed. Fix the item on the order (or tell Claude), then print.",
+    "STOCK-FIX": "Packed and validated, but the real products weren't taken out of Odoo stock. The detail says why.",
     "BT-NOTFOUND": "Printer not found. Is it switched on, and is Label Expert on the phone closed?",
     "BT-PERMISSION": "This Mac hasn't allowed Bluetooth for Pack Station. System Settings > Privacy & Security > Bluetooth.",
     "BT-SEND": "The printer stopped receiving part-way. Check it's on and has labels, then print again.",

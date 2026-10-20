@@ -37,6 +37,7 @@ def build_sources(cfg: dict) -> list[Source]:
     sources.append(ManualSource(data_dir))   # data/manual_orders.json; empty unless orders were added by hand
     if cfg.get("odoo", {}).get("enabled"):
         odoo = OdooSource(cfg["odoo"])
+        odoo.attach(data_dir)
         sources.append(odoo)
         # Shopee cross-border shops (e.g. Singapore) that Odoo's Shopee connector doesn't fetch
         regions = cfg["odoo"].get("shopee_sip_regions") or []

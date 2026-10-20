@@ -18,7 +18,7 @@ from flask import Flask, jsonify, request, send_file
 from PIL import Image, ImageDraw
 
 from .engine import Busy, Engine
-from .errors import CODES, PackError
+from .errors import CODES, PackError, classify
 from .labels import LabelData, icon_names, labels_for_order, render_product_label
 
 LOCAL = {"127.0.0.1", "::1"}
@@ -237,6 +237,7 @@ def create_app(engine: Engine) -> Flask:
     def packed(key):
         want = bool((request.get_json(silent=True) or {}).get("packed", True))
         validated = False
+        stock_fix = None
         if want and engine.cfg.get("odoo", {}).get("validate_when_packed", True):
             order = next((o for o in engine.orders if o.key == key), None)
             odoo = next((s for s in engine.sources if getattr(s, "name", "") == "odoo"), None)
@@ -248,9 +249,23 @@ def create_app(engine: Engine) -> Flask:
                     engine.log.add("info", f"Packed and validated in Odoo: {order.order_id}", None, key)
                 except Exception as e:
                     return err(e)
+                # A delivery on "TikTok Shop Sale" took the placeholder out of stock, not the bottles
+                if hasattr(odoo, "deduct_real_items"):
+                    try:
+                        fix = odoo.deduct_real_items(order)
+                        if fix:
+                            stock_fix = fix
+                            engine.log.add("info", f"Real products taken out of Odoo stock with {fix}", None, key)
+                    except Exception as e:
+                        engine.store.mark_packed(key, want)
+                        e2 = classify(e, "taking the real products out of Odoo stock")
+                        engine.log.add("error", e2.text, e2.code, key)
+                        return jsonify(ok=False, validated=True, packed=True, error=e2.as_dict(),
+                                       message="Packed and validated, but the stock fix failed"), 200
         engine.store.mark_packed(key, want)
-        return jsonify(ok=True, validated=validated,
-                       message="Packed and validated in Odoo" if validated else ("Packed" if want else "Not packed"))
+        return jsonify(ok=True, validated=validated, stock_fix=stock_fix,
+                       message=("Packed and validated in Odoo" + (f"; stock taken out with {stock_fix}" if stock_fix else ""))
+                       if validated else ("Packed" if want else "Not packed"))
 
     @app.get("/api/find")
     def find():

@@ -107,7 +107,6 @@ main{overflow:hidden;position:relative}
 .state{font-size:13px;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;color:var(--ink)}
 .state::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--faint)}
 .state.ready::before{background:var(--blue)}.state.busy::before{background:var(--blue)}
-.state.arrange{color:var(--amber)}.state.arrange::before{background:#F59E0B}
 .state.waybill_missing,.state.held{color:var(--red)}.state.waybill_missing::before,.state.held::before{background:var(--red)}
 .state.printed{color:var(--muted)}.state.packed{color:var(--muted)}.state.packed::before{background:var(--ink)}
 .why{font-size:13px;color:var(--red);line-height:1.35}
@@ -168,6 +167,31 @@ h3{font-size:13px;color:var(--muted);margin:20px 0 8px;letter-spacing:.01em}
 .btn.sm{padding:8px 12px;font-size:14px}
 .btn svg{width:16px;height:16px;vertical-align:-3px;margin-right:6px}
 .errbox{background:var(--redt);color:var(--red);border-radius:12px;padding:10px 12px;font-size:14px;margin-top:10px}
+/* selected order: one card per kind of information */
+.packbig{width:100%;display:flex;align-items:center;justify-content:center;gap:10px;padding:20px 16px;font-size:22px;
+  border-radius:16px;background:var(--ink);color:#fff;letter-spacing:-.01em;margin-top:4px}
+.packbig svg{width:24px;height:24px}
+.packbig:active:not(:disabled){background:#000}
+.packbig.done{background:var(--bg2);color:var(--ink);font-size:18px;padding:14px 16px}
+.packbig.done small{color:var(--muted);font-size:14px}
+.ocard{background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-top:10px}
+.ocard .hd{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.ocard .sub{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-top:4px;color:var(--muted);font-size:14px}
+.ocard .cap{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+.facts{display:grid;grid-template-columns:auto 1fr;gap:7px 14px;font-size:14px;margin:0}
+.facts dt{color:var(--muted);white-space:nowrap}
+.facts dd{margin:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.facts dd.mono{font-family:var(--mono);font-size:13px}
+.irow{display:grid;grid-template-columns:1fr auto;gap:4px 10px;padding:9px 0;border-top:1px solid var(--line);font-size:15px}
+.irow:first-of-type{border-top:0;padding-top:2px}
+.irow .nm{overflow-wrap:anywhere}
+.irow .sku{display:block;font-size:12px;color:var(--muted);font-family:var(--mono)}
+.irow .qty{font-variant-numeric:tabular-nums;color:var(--muted);text-align:right}
+.ocard .preview{margin-top:0}
+.ocard .actions{margin-top:0}
+.ocard .actions + .cap{margin-top:12px}
+.probs{background:var(--redt);border-color:transparent;color:var(--red);font-size:14px}
+.probs ul{margin:0;padding-left:18px}
 .jobs .job{border-bottom:1px solid var(--line);padding:10px 0;font-size:14px}
 .job .h{display:flex;justify-content:space-between;gap:8px}
 .job .when{color:var(--muted);font-variant-numeric:tabular-nums}
@@ -451,9 +475,9 @@ function dueInfo(iso) {
   return {text: (same ? "Today " : d.toLocaleDateString([], {weekday:"short", day:"numeric", month:"short"}) + " ")
     + d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}), cls: d < now ? "late" : same ? "today" : ""};
 }
-const STATE_TEXT = {ready: "To print", arrange: "Book courier", printed: "Printed", packed: "Packed",
+const STATE_TEXT = {ready: "To print", printed: "Printed", packed: "Packed",
   waybill_missing: "Waybill missing", held: "Missing info", busy: "Printing…"};
-const FILTERS = [["all", "All"], ["ready", "To print"], ["arrange", "Book courier"], ["missing", "Missing info"],
+const FILTERS = [["all", "All"], ["ready", "To print"], ["missing", "Missing info"],
   ["printed", "Printed"], ["packed", "Packed"]];
 const inFilter = (o, f) => f === "all" || (f === "missing" ? ["waybill_missing", "held"].includes(o.state) : o.state === f);
 function money(o) {
@@ -464,6 +488,7 @@ function money(o) {
 const totalHtml = o => o.total == null ? `<span class="total none">No total</span>` : `<span class="total">${esc(money(o))}</span>`;
 const codeHtml = o => o.match ? `<span class="code">#${esc(o.match)}</span>` : `<span class="code none">${esc(o.order_id)}</span>`;
 const srcHtml = o => `<span class="src ${esc(o.platform || o.source)}">${esc(o.platform || o.source)}</span>`;
+const nice = n => String(n || "").replace(/^\s*\[[^\]]*\]\s*/, "");
 const whyText = o => o.state === "held" ? "Missing: " + o.missing.join("; ") : o.state === "waybill_missing" ? "No waybill yet. Press Refresh." : "";
 
 function render() {
@@ -520,10 +545,10 @@ function render() {
 
   // print all
   const pa = $("#printAll"), busy = S.jobs.some(j => j.kind === "print_all" && (j.state === "queued" || j.state === "running"));
-  const n = S.plan.ready.length, a = S.plan.arrange.length;
-  pa.disabled = busy || (!n && !a);
-  pa.firstChild.textContent = busy ? "Printing…" : (n || a) ? "Print all" : "All printed";
-  $("#printAllSub").textContent = `${n} orders · ${S.plan.labels} labels` + (a ? ` · ${a} need courier` : "")
+  const n = S.plan.ready.length;
+  pa.disabled = busy || !n;
+  pa.firstChild.textContent = busy ? "Printing…" : n ? "Print all" : "All printed";
+  $("#printAllSub").textContent = `${n} orders · ${S.plan.labels} labels`
     + (S.plan.missing.length ? ` · ${S.plan.missing.length} no waybill` : "")
     + ((S.plan.held || []).length ? ` · ${S.plan.held.length} held` : "");
   const hold = !!S.settings.hold_incomplete, sw = $("#holdSw");
@@ -535,7 +560,7 @@ function render() {
 
 function card(o) {
   const due = dueInfo(o.ship_by);
-  const items = o.items.slice(0, 3).map(i => `<div><span class="q">${i.qty}×</span>${esc(i.name)}</div>`).join("")
+  const items = o.items.slice(0, 3).map(i => `<div><span class="q">${i.qty}×</span>${esc(nice(i.name))}</div>`).join("")
     + (o.items.length > 3 ? `<div style="color:var(--muted)">+${o.items.length - 3} more</div>` : "");
   const why = whyText(o);
   return `<button class="card ${o.key === selected ? "sel" : ""} ${o.state === "packed" ? "dim" : ""}" data-key="${esc(o.key)}">
@@ -549,7 +574,7 @@ function card(o) {
 
 function lrow(o) {
   const due = dueInfo(o.ship_by);
-  const items = o.items.map(i => `${i.qty}× ${i.name}`).join(", ");
+  const items = o.items.map(i => `${i.qty}× ${nice(i.name)}`).join(", ");
   const why = whyText(o) || (o.error ? o.error.code : "");
   return `<button class="lrow ${o.key === selected ? "sel" : ""} ${o.state === "packed" ? "dim" : ""}" data-key="${esc(o.key)}">
     <span>${codeHtml(o)}</span><span class="c-src">${srcHtml(o)}</span>
@@ -568,32 +593,66 @@ function jobHtml(j) {
     ${j.summary ? `<div>${esc(j.summary)}</div>` : ""}${j.error && !j.results.length ? `<div class="no">${esc(errText(j.error))}</div>` : ""}${steps}${results}</div>`;
 }
 
+const ICON_BOX = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>`;
+const ICON_TICK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>`;
+
 function renderRegister() {
   const o = S.orders.find(x => x.key === selected);
   let html = "";
   if (o) {
     const busy = S.busy.includes(o.key);
     const unknown = o.items.filter(i => !i.known).length;
-    const canWaybill = o.has_waybill && o.waybill_ready && !o.needs_arrange;
+    const canWaybill = o.has_waybill && o.waybill_ready;
+    const due = dueInfo(o.ship_by);
+    const packed = o.state === "packed";
+    const probs = [];
+    if (o.state === "held") probs.push(whyText(o).replace(/^Missing: /, "Missing: "));
+    if (o.state === "waybill_missing") probs.push(o.source === "odoo" ? "No waybill yet. Print will ask Shopee/TikTok for it." : "No waybill yet. Press Refresh.");
+    if (o.error) probs.push(errText(o.error));
+    const facts = [
+      ["Shop", srcHtml(o)],
+      [o.source === "odoo" ? "Delivery" : "Order", `<span>${esc(o.order_id)}</span>`],
+      ["Tracking", o.tracking ? `<span>${esc(o.tracking)}</span>` : `<span style="color:var(--muted)">${o.has_waybill ? "comes with the waybill" : "none (no waybill)"}</span>`],
+      ["Ship by", `<span class="due ${due.cls}">${esc(due.text)}</span>`],
+      ["Labels", `<span>${o.labels} label${o.labels !== 1 ? "s" : ""}${o.has_waybill ? " + waybill" : ""}</span>`],
+      ...(o.printed_at ? [["Printed", `<span>${hhmm(o.printed_at)}</span>`]] : []),
+    ];
     html += `<div class="detail"><h3>Selected order</h3>
-      <div class="row">${codeHtml(o)}<span class="state ${o.state}">${STATE_TEXT[o.state] || o.state}</span></div>
-      <div class="row" style="margin-top:6px">${totalHtml(o)}<span class="due ${dueInfo(o.ship_by).cls}" style="font-size:13px;color:var(--muted)">${esc(dueInfo(o.ship_by).text)}</span></div>
-      <div class="ids">${srcHtml(o)} <span>${esc(o.order_id)}${o.tracking ? " · " + esc(o.tracking) : " · no tracking number yet"}${o.printed_at ? " · printed " + hhmm(o.printed_at) : ""}</span></div>
-      ${o.state === "held" ? `<div class="errbox">${esc(whyText(o))}. Print all skips it while "Hold orders with missing info" is on.</div>`
-        : o.error ? `<div class="errbox">${esc(errText(o.error))}</div>` : ""}
-      <ul>${o.items.map(i => `<li><span>${esc(i.name)}${i.known ? "" : '<span class="flag">not in label list</span>'}${i.bottles > 1 ? `<span class="pack">${i.bottles} bottles of ${esc(i.size)} each: ${i.qty * i.bottles} labels</span>` : ""}</span><span class="q">×${i.qty}</span></li>`).join("")}</ul>
-      ${o.items.length ? `<img class="preview" src="/api/preview/${encodeURIComponent(o.key)}?t=${Date.now() >> 15}" alt="">` : ""}
-      ${unknown ? `<p class="hint">${unknown} product${unknown > 1 ? "s are" : " is"} not in the label list, so the label is guessed from the name. Add ${unknown > 1 ? "them" : "it"} under Labels.</p>` : ""}
-      <div class="actions">
-        ${o.state === "arrange" ? `<button class="btn warn" id="printOne" ${busy ? "disabled" : ""}>Book courier &amp; print</button>`
-          : `<button class="btn solid" id="printOne" ${busy || o.state === "waybill_missing" ? "disabled" : ""}>${o.printed_at ? "Print again" : "Print"}</button>`}
-        <button class="btn" id="packOne">${o.state === "packed" ? "Undo packed" : "Mark packed"}</button>
-        ${o.printed_at ? `<button class="btn" id="unprintOne" ${busy ? "disabled" : ""}>Mark not printed</button>` : ""}
+      <button class="packbig ${packed ? "done" : ""}" id="packOne">${packed
+        ? `${ICON_TICK}<span>Packed <small>· tap to undo</small></span>`
+        : `${ICON_BOX}<span>Mark packed</span>`}</button>
+
+      <div class="ocard">
+        <div class="hd">${codeHtml(o)}<span class="state ${o.state}">${STATE_TEXT[o.state] || o.state}</span></div>
+        <div class="sub">${totalHtml(o)}</div>
       </div>
-      <h3>Reprint one part</h3>
-      <div class="actions" style="margin-top:0">
-        <button class="btn" id="rpWaybill" ${busy || !canWaybill ? "disabled" : ""}>Waybill only</button>
-        <button class="btn" id="rpLabels" ${busy || !o.items.length ? "disabled" : ""}>All ${o.labels} label${o.labels !== 1 ? "s" : ""}</button>
+
+      ${probs.length ? `<div class="ocard probs"><ul>${probs.map(p => `<li>${esc(p)}</li>`).join("")}</ul></div>` : ""}
+
+      <div class="ocard"><div class="cap">Details</div>
+        <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+      </div>
+
+      <div class="ocard"><div class="cap">Items</div>
+        ${o.items.length ? o.items.map(i => {
+          const sku = (String(i.name).match(/^\s*\[([^\]]+)\]/) || [])[1] || i.sku || "";
+          return `<div class="irow"><span class="nm">${esc(nice(i.name))}${i.known ? "" : '<span class="flag">not in label list</span>'}${sku ? `<span class="sku">${esc(sku)}</span>` : ""}${i.bottles > 1 ? `<span class="pack">${i.bottles} bottles of ${esc(i.size)} each: ${i.qty * i.bottles} labels</span>` : ""}</span><span class="qty">×${i.qty}</span></div>`;
+        }).join("") : `<div style="color:var(--muted);font-size:14px">No products</div>`}
+      </div>
+
+      ${o.items.length ? `<div class="ocard"><div class="cap">Label</div><img class="preview" src="/api/preview/${encodeURIComponent(o.key)}?t=${Date.now() >> 15}" alt="">
+        ${unknown ? `<p class="hint" style="margin:8px 0 0">${unknown} product${unknown > 1 ? "s are" : " is"} not in the label list, so the label is read from the name.</p>` : ""}</div>` : ""}
+
+      <div class="ocard"><div class="cap">Print</div>
+        <div class="actions">
+          <button class="btn solid" id="printOne" ${o.printed_at ? "" : 'style="grid-column:1/-1"'} ${busy ? "disabled" : ""}>${busy ? "Printing…" : o.printed_at ? "Print again" : "Print"}</button>
+          ${o.printed_at ? `<button class="btn" id="unprintOne" ${busy ? "disabled" : ""}>Mark not printed</button>` : ""}
+        </div>
+        <div class="cap">Reprint one part</div>
+        <div class="actions">
+          <button class="btn" id="rpWaybill" ${busy || !canWaybill ? "disabled" : ""}>Waybill only</button>
+          <button class="btn" id="rpLabels" ${busy || !o.items.length ? "disabled" : ""}>All ${o.labels} label${o.labels !== 1 ? "s" : ""}</button>
+        </div>
       </div></div>`;
   } else {
     html += `<p class="hint">Tap an order to see its items and label, print it on its own, reprint its waybill or labels, or mark it packed.</p>`;
@@ -614,21 +673,16 @@ function renderRegister() {
     $("#packOne").onclick = async () => {
       const packing = o.state !== "packed";
       if (!packing && !await confirmBox("Undo packed?", "This only changes Pack Station. The delivery stays validated in Odoo.", "Undo packed")) return;
+      const btn = $("#packOne"); btn.disabled = true;
       const r = await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed: packing})});
-      if (!r.ok) await confirmBox("Not validated in Odoo", errText(r.error) || r.message || "Try again.", "OK");
+      if (!r.ok) await confirmBox(r.validated ? "Stock not updated" : "Not validated in Odoo", errText(r.error) || r.message || "Try again.", "OK");
       kick();
     };
   }
 }
 
 async function printOne(o, opts = null) {
-  if (!opts) {
-    opts = {force: false, arrange: false, allow_incomplete: false};
-    if (o.state === "arrange") {
-      if (!await confirmBox("Book the TikTok courier?", `This books a ${S.settings.tiktok_ship_method === "pickup" ? "pickup" : "drop-off"} with TikTok for ${o.order_id}, then prints its waybill and labels.`, "Book courier & print")) return;
-      opts.arrange = true;
-    }
-  }
+  if (!opts) opts = {force: false, allow_incomplete: false};
   const r = await api(`/api/print/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify(opts)});
   if (r.needs_confirm) {
     if (await confirmBox("Already printed", `This order was already printed at ${hhmm(r.printed_at)}. Print it again?`, "Print again")) printOne(o, {...opts, force: true});
@@ -664,22 +718,12 @@ document.querySelectorAll("#viewSeg button").forEach(b => b.onclick = () => {
 
 $("#printAll").onclick = async () => {
   const plan = await api("/api/plan");
-  const n = plan.ready.length, a = plan.arrange.length, m = plan.missing.length;
+  const n = plan.ready.length, m = plan.missing.length;
   const h = (plan.held || []).length;
-  const extra = (m ? `\n\n${m} order${m > 1 ? "s have" : " has"} no waybill yet and will be skipped (WAYBILL-MISSING). Press Refresh first to fetch them.` : "")
-    + (h ? `\n\n${h} order${h > 1 ? "s are" : " is"} missing info and held back (INFO-MISSING).` : "");
-  let arrange = false;
-  if (a) {
-    const how = plan.ship_method === "pickup" ? "pickup" : "drop-off";
-    const choice = await choose("Book TikTok couriers?",
-      `${a} TikTok order${a > 1 ? "s need" : " needs"} a courier booked (${how}) before the waybill exists. Booking can't be undone from here.\n\n${n} other order${n !== 1 ? "s are" : " is"} ready to print.${extra}`,
-      [{label: `Book ${a} courier${a > 1 ? "s" : ""} and print all`, value: "yes", cls: "warn"},
-       ...(n ? [{label: `Print the ${n} ready order${n > 1 ? "s" : ""} only`, value: "no", cls: "solid"}] : []),
-       {label: "Cancel", value: "cancel"}]);
-    if (choice === "cancel") return;
-    arrange = choice === "yes";
-  } else if (!await confirmBox("Print all?", `${n} waybill${n !== 1 ? "s" : ""} and ${plan.labels} bottle labels will print, order by order.${extra}`, "Print all")) return;
-  const r = await api("/api/print-all", {method: "POST", body: JSON.stringify({arrange})});
+  const extra = (m ? `\n\n${m} order${m > 1 ? "s have" : " has"} no waybill and will be skipped. Press Refresh first.` : "")
+    + (h ? `\n\n${h} order${h > 1 ? "s are" : " is"} missing info and held back.` : "");
+  if (!await confirmBox("Print all?", `${n} order${n !== 1 ? "s" : ""} and ${plan.labels} bottle labels will print, order by order. Waybills Odoo doesn't have yet are fetched from Shopee/TikTok on the way.${extra}`, "Print all")) return;
+  const r = await api("/api/print-all", {method: "POST", body: JSON.stringify({})});
   if (r.busy) notice("Already in progress", r.message);
   else if (!r.ok) notice("Can't print", errText(r.error));
   kick();
@@ -846,9 +890,9 @@ function renderSettings() {
       <img class="qr" src="/api/qr.png" alt="QR code">
       ${S.addresses.map(a => `<div class="addr">${esc(a)}</div>`).join("") || `<div class="addr">${esc(location.origin)}</div>`}
       <p style="margin-top:10px">The Mac must stay on with Pack Station open. It is kept awake automatically while Pack Station runs.</p></div>
-    <div class="pcard"><h2>TikTok couriers</h2>
-      <p>When a TikTok order has no waybill yet, Print all can book the courier for you (it always asks first).</p>
-      <div class="fieldrow"><label>Courier booking</label><span class="seg" id="shipSeg">
+    <div class="pcard"><h2>Handing parcels over</h2>
+      <p>How parcels reach the courier. Used when printing has to arrange a Shopee or TikTok shipment to get its waybill.</p>
+      <div class="fieldrow"><label>Handover</label><span class="seg" id="shipSeg">
         <button data-v="dropoff" class="${st.tiktok_ship_method !== "pickup" ? "on" : ""}">Drop-off</button>
         <button data-v="pickup" class="${st.tiktok_ship_method === "pickup" ? "on" : ""}">Pickup</button></span></div></div>
     <div class="pcard" style="grid-column:1/-1"><h2>Which Odoo deliveries to show</h2>
@@ -888,7 +932,7 @@ function renderSettings() {
     await notice(r.ok ? "Saved" : "Not saved", r.ok ? `${what} saved at ${new Date().toLocaleTimeString()}.` : (r.message || errText(r.error)));
     await refreshState(); renderSettings();
   };
-  document.querySelectorAll("#shipSeg button").forEach(b => b.onclick = () => save({tiktok_ship_method: b.dataset.v}, "Courier booking"));
+  document.querySelectorAll("#shipSeg button").forEach(b => b.onclick = () => save({tiktok_ship_method: b.dataset.v}, "Handover"));
   document.querySelectorAll("#stateSeg button").forEach(b => b.onclick = () => save({include_waiting: b.dataset.v === "1"}, "Order setting"));
   document.querySelectorAll("#dropSeg button").forEach(b => b.onclick = () => save({include_dropship: b.dataset.v === "1"}, "Dropship setting"));
   api("/api/shopee-sg").then(r => {

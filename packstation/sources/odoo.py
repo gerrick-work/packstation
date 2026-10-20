@@ -23,6 +23,7 @@ from datetime import datetime
 from ..errors import PackError
 from ..models import Item, Order
 from . import Source
+from .direct import ShopeeDirect, TikTokDirect, WaybillCache
 
 DEFAULT_CRONS = [73, 77, 74]  # Shopee sync orders, TikTok sync orders, Shopee sync shipping labels
 # The connectors put marketplace items they can't match to an Odoo product (by SKU) on a catch-all
@@ -70,6 +71,12 @@ class OdooSource(Source):
         # Odoo operation types to read: "outgoing" = Delivery. Add e.g. "dropship" if a shop ships that way.
         self.type_codes = list(cfg.get("picking_type_codes", ["outgoing"]))
         self.placeholders = {str(n).strip().lower() for n in cfg.get("placeholder_products", [])}
+        # Ask Shopee/TikTok directly (with the keys Odoo's connectors hold) when Odoo has no waybill
+        # or filed a TikTok item as "TikTok Shop Sale". attach() gives the folder for fetched waybills.
+        self.direct = bool(cfg.get("direct_fallback", True))
+        self.cache = WaybillCache(None)
+        self._tt_api = None
+        self._sp_api = None
         self._ctx = None
         self.sleep = sleep
         self._uid = None
@@ -82,6 +89,22 @@ class OdooSource(Source):
                                                     transport=_TimeoutTransport(60))
             self.slow = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/object", allow_none=True,
                                                   transport=_TimeoutTransport(600))
+
+    def attach(self, data_dir) -> None:
+        self.data_dir = data_dir
+        self.cache = WaybillCache(data_dir)
+
+    @property
+    def tiktok_api(self) -> TikTokDirect:
+        if self._tt_api is None:
+            self._tt_api = TikTokDirect(self)
+        return self._tt_api
+
+    @property
+    def shopee_api(self) -> ShopeeDirect:
+        if self._sp_api is None:
+            self._sp_api = ShopeeDirect(self, getattr(self, "data_dir", None))
+        return self._sp_api
 
     # ---- transport ------------------------------------------------------------------
 
@@ -196,7 +219,117 @@ class OdooSource(Source):
         self._sold = self._sold_items(sales)
         self._sp_files = self._shopee_files([p["id"] for p in pickings])
         found = self._attached_labels(pickings)
-        return [self._to_order(p, moves, prods, refs, found.get(p["id"]), totals) for p in pickings]
+        orders = [self._to_order(p, moves, prods, refs, found.get(p["id"]), totals) for p in pickings]
+        self._fill_gaps(orders)
+        return orders
+
+    # ---- gaps Odoo leaves: placeholder items, missing waybills ----------------------------------
+
+    def _tiktok_sku_products(self) -> dict[str, dict]:
+        """TikTok variant id -> Odoo product, from the connector's links (tiktok.item)."""
+        try:
+            rows = self._x("tiktok.item", "search_read", [], fields=["product_id", "tiktok_sku_extern_id"],
+                           context=self.ctx())
+        except Exception:
+            return {}
+        pids = list({r["product_id"][0] for r in rows if r.get("product_id")})
+        prods = {p["id"]: p for p in self._x("product.product", "read", pids, fields=["default_code", "display_name"],
+                                             context=self.ctx())} if pids else {}
+        return {str(r["tiktok_sku_extern_id"]): prods.get(r["product_id"][0], {})
+                for r in rows if r.get("product_id") and r.get("tiktok_sku_extern_id")}
+
+    def _fill_gaps(self, orders: list[Order]) -> None:
+        if not self.direct:
+            return
+        sku_products = None
+        for o in orders:
+            if o.platform == "tiktok" and o.ref.get("tt_ref") and any(PLACEHOLDER_RE.match(i.name) for i in o.items):
+                try:
+                    if sku_products is None:
+                        sku_products = self._tiktok_sku_products()
+                    real = self.tiktok_api.items(o.ref["tt_ref"], sku_products)
+                    if real:
+                        o.items, o.ref["items_from"] = real, "tiktok"
+                except PackError as e:
+                    o.ref["direct_error"] = e.as_dict()
+            if o.platform and not o.waybill_ready:
+                self._direct_waybill(o, arrange=False)
+
+    def _use_file(self, o: Order, path) -> Order:
+        o.ref["label"] = ["file", str(path)]
+        o.ref["label_attachment_id"] = None
+        o.waybill_ready, o.needs_arrange = True, False
+        return o
+
+    def _direct_waybill(self, o: Order, arrange: bool, method: str = "dropoff") -> bool:
+        """Fetch the waybill straight from Shopee/TikTok into data/waybills/. `arrange` also books the
+        shipment first when it isn't yet (only when printing). True when the order now has one."""
+        cached = self.cache.get(o.order_id)
+        if cached:
+            self._use_file(o, cached)
+            return True
+        if not self.direct or not self.cache.dir:
+            return False
+        try:
+            pdf = None
+            if o.platform == "tiktok" and o.ref.get("tt_ref"):
+                api = self.tiktok_api
+                if arrange:
+                    api.ship(o.ref["tt_ref"], o.ref.get("tt_package", ""), method)
+                for n in range(8 if arrange else 1):
+                    pdf = api.label(o.ref["tt_ref"], o.ref.get("tt_package", ""))
+                    if pdf:
+                        break
+                    self.sleep(4)
+                if pdf and not o.tracking:
+                    o.tracking = api.order(o.ref["tt_ref"]).get("tracking_number") or o.tracking
+            elif o.platform == "shopee" and o.ref.get("sp_ref"):
+                api = self.shopee_api
+                sn = o.ref["sp_ref"]
+                tracking = o.tracking or api.tracking(sn)   # Odoo's connector arranges Shopee shipments
+                if tracking:
+                    o.tracking = tracking
+                    pdf = api.label(sn, tracking)
+            if pdf:
+                self._use_file(o, self.cache.put(o.order_id, pdf))
+                o.ref.pop("direct_error", None)
+                return True
+        except PackError as e:
+            o.ref["direct_error"] = e.as_dict()
+        except Exception as e:  # never let a platform hiccup break the order list
+            o.ref["direct_error"] = PackError("WAYBILL-MISSING", "asking the platform directly", str(e)[:160]).as_dict()
+        return False
+
+    def ensure_waybill(self, order: Order, method: str = "dropoff") -> Order:
+        """Called when printing an order with no waybill: books the shipment if needed (TikTok through
+        Odoo first, so Odoo stays in step) and gets the waybill, from Odoo or straight from the platform."""
+        if order.waybill_ready:
+            return order
+        if order.platform == "tiktok" and order.needs_arrange:
+            try:
+                fresh = self.arrange(order, method)
+                fresh.items, fresh.ref = order.items, {**order.ref, **fresh.ref}
+                if fresh.waybill_ready:
+                    return fresh
+            except PackError as e:
+                if e.code == "ODOO-AUTH":
+                    raise
+                order.ref["direct_error"] = e.as_dict()
+        if order.platform == "shopee" and len(self.crons) > 2:
+            try:   # let Odoo's "sync shipping labels" run once more, then look again
+                self.run_cron(self.crons[2])
+                fresh = self._reload(order)
+                if fresh.waybill_ready:
+                    fresh.ref = {**order.ref, **fresh.ref}
+                    return fresh
+            except PackError:
+                pass
+        if self._direct_waybill(order, arrange=True, method=method):
+            return order
+        err = order.ref.get("direct_error") or {}
+        code = err.get("code") if err.get("code") in ("TIKTOK-ARRANGE", "TIKTOK-API") else "WAYBILL-MISSING"
+        raise PackError(code, err.get("step") or "fetching waybill",
+                        err.get("detail") or "Shopee/TikTok has no waybill for it yet")
 
     def is_placeholder(self, prod: dict) -> bool:
         name = (prod.get("display_name") or "").strip()
@@ -464,7 +597,9 @@ class OdooSource(Source):
             platform=platform,
             odoo_picking_id=p["id"],
             ref={"platform_ref": str(ref).strip(), "origin": p.get("origin") or "", "label": list(label) if label else None,
-                 "label_attachment_id": label[1] if label and label[0] == "att" else None},
+                 "label_attachment_id": label[1] if label and label[0] == "att" else None,
+                 "tt_ref": str(p.get("tiktok_order_ref") or ""), "tt_package": str(p.get("tiktok_packing_ref") or ""),
+                 "sp_ref": str(p.get("shopee_order_ref") or "")},
             total=float(total) if total is not None and total is not False else None,
             currency=currency or "",
         )
@@ -473,7 +608,8 @@ class OdooSource(Source):
         f = self.fields()
         read = [n for n in ["name", "move_ids", "sale_id", "scheduled_date", "date_deadline", self.f_tracking,
                             self.f_tt_status, self.f_tt_label, self.f_sp_status, self.f_sp_label] if n and n in f]
-        read += [n for n in f if (n.startswith("tiktok_") or n.startswith("shopee_")) and "tracking" in n]
+        read += [n for n in f if (n.startswith("tiktok_") or n.startswith("shopee_"))
+                 and ("tracking" in n or n in ("tiktok_order_ref", "tiktok_packing_ref", "shopee_order_ref"))]
         read += [n for n in self._label_fields("tiktok") + self._label_fields("shopee") if n not in read]
         p = self._x("stock.picking", "read", [order.odoo_picking_id], fields=read,
                     context=dict(self.ctx(), bin_size=True))[0]
@@ -491,6 +627,11 @@ class OdooSource(Source):
         if not label:
             raise PackError("WAYBILL-MISSING", "fetching waybill from Odoo")
         kind, where = label
+        if kind == "file":
+            try:
+                return open(where, "rb").read()
+            except OSError as e:
+                raise PackError("WAYBILL-MISSING", "reading the saved waybill", str(e)[:160]) from e
         step = "fetching waybill from Odoo"
         if kind == "att":
             if getattr(self, "_att_field", None) is None:
@@ -635,6 +776,96 @@ class OdooSource(Source):
         rows = self._x("stock.picking", "read", [picking_id], fields=["state"], step=step, context=self.ctx())
         if rows and rows[0].get("state") != "done":
             raise PackError("ODOO-VALIDATE", step, f"delivery is still '{rows[0].get('state')}'")
+
+    # ---- stock for items Odoo filed under a placeholder ---------------------------------------
+
+    def placeholder_moves(self, picking_ids: list[int]) -> list[dict]:
+        moves = self._x("stock.move", "search_read", [("picking_id", "in", picking_ids)],
+                        fields=["product_id", "picking_id"], context=self.ctx())
+        return [m for m in moves if m.get("product_id") and PLACEHOLDER_RE.match(m["product_id"][1] or "")
+                or (m.get("product_id") and (m["product_id"][1] or "").strip().lower() in self.placeholders)]
+
+    def _product_for(self, item: Item) -> tuple[int, float] | None:
+        """(product id, units) for a bottle line: by SKU, else by name and size ("Galaxolide 50 15g").
+        A "15g x2" pack is 2 units of the 15g product."""
+        from ..labels import _pack_title, parse_pack
+
+        name = re.sub(r"^\s*\[[^\]]*\]\s*", "", item.name).strip()
+        pack = parse_pack(name)
+        bottles = pack[1] if pack else 1
+        ctx = self.ctx()
+        if item.sku and not pack:
+            hit = self._x("product.product", "search_read", [("default_code", "=", item.sku)], fields=["id"],
+                          limit=1, context=ctx)
+            if hit:
+                return hit[0]["id"], item.qty
+        want = f"{_pack_title(name, pack[2])} {pack[0]}" if pack else name
+        hit = self._x("product.product", "search_read", [("name", "=ilike", want), ("sale_ok", "=", True)],
+                      fields=["id"], limit=2, context=ctx)
+        if len(hit) == 1:
+            return hit[0]["id"], item.qty * bottles
+        return None
+
+    def deduct_real_items(self, order: Order) -> str | None:
+        """Odoo validated the delivery on a placeholder ("TikTok Shop Sale"), so the real bottles never
+        left stock. Book them out with a second delivery for the same customer, once. Returns its name,
+        or None when nothing was needed. Raises STOCK-FIX."""
+        step = "taking the real products out of Odoo stock"
+        pids = [int(p) for p in (order.ref.get("odoo_picking_ids") or [order.odoo_picking_id]) if p]
+        if not pids or not self.placeholder_moves(pids):
+            return None
+        src = self._x("stock.picking", "read", pids[:1], fields=["name", "picking_type_id", "location_id",
+                                                               "location_dest_id", "partner_id", "company_id"],
+                      context=self.ctx())[0]
+        origin = f"Pack Station stock fix for {src['name']}"
+        done = self._x("stock.picking", "search_read", [("origin", "=", origin), ("state", "!=", "cancel")],
+                       fields=["name"], limit=1, context=self.ctx())
+        if done:
+            return done[0]["name"]
+        lines, unknown = [], []
+        for it in order.items:
+            if PLACEHOLDER_RE.match(it.name):
+                unknown.append(it.name)
+                continue
+            hit = self._product_for(it)
+            if hit:
+                lines.append(hit)
+            else:
+                unknown.append(it.name)
+        if unknown or not lines:
+            raise PackError("STOCK-FIX", step, "no Odoo product found for: " + ", ".join(unknown or ["the items"]))
+        prods = {p["id"]: p for p in self._x("product.product", "read", list({l[0] for l in lines}),
+                                             fields=["uom_id", "display_name"], context=self.ctx())}
+        loc, dest = src["location_id"][0], src["location_dest_id"][0]
+        vals = {"picking_type_id": src["picking_type_id"][0], "location_id": loc, "location_dest_id": dest,
+                "origin": origin,
+                "move_ids": [(0, 0, {"product_id": pid, "product_uom_qty": qty, "product_uom": prods[pid]["uom_id"][0],
+                                     "name": prods[pid]["display_name"], "location_id": loc, "location_dest_id": dest})
+                             for pid, qty in lines]}
+        if src.get("partner_id"):
+            vals["partner_id"] = src["partner_id"][0]
+        try:
+            new = self._x("stock.picking", "create", [vals], step=step, context=self.ctx())
+            new = new[0] if isinstance(new, list) else new
+            self._x("stock.picking", "action_confirm", [new], step=step, context=self.ctx())
+            moves = self._x("stock.move", "search_read", [("picking_id", "=", new)],
+                            fields=["product_uom_qty"], context=self.ctx())   # kits are split into their parts
+            for m in moves:
+                self._x("stock.move", "write", [m["id"]], {"quantity": m["product_uom_qty"], "picked": True},
+                        step=step, context=self.ctx())
+            self.validate(new)
+        except PackError as e:
+            raise PackError("STOCK-FIX", step, e.detail or e.code) from e
+        except xmlrpc.client.Fault as e:
+            raise PackError("STOCK-FIX", step, e.faultString.strip().splitlines()[-1][:200]) from e
+        name = self._x("stock.picking", "read", [new], fields=["name"], context=self.ctx())[0]["name"]
+        try:
+            self._x("stock.picking", "message_post", [pids[0]], context=self.ctx(),
+                    body=f"Pack Station: this delivery was on a placeholder product, so the real bottles were "
+                         f"taken out of stock with {name}.")
+        except Exception:
+            pass
+        return name
 
     def note_printed(self, picking_id: int, text: str) -> None:
         if self.post_note:

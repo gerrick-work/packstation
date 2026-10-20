@@ -202,7 +202,7 @@ def test_catch_all_product_without_a_name_is_flagged(tmp_path):
     eng.scan()
     o = by_name(eng)["WH/OUT/00073"]
     assert o.items[0].name == "TikTok Shop Sale"
-    assert "Odoo has no product name for: TikTok Shop Sale" in eng.missing_info(o)
+    assert "product unknown (Odoo and TikTok didn't say which): TikTok Shop Sale" in eng.missing_info(o)
 
 
 def test_catch_all_product_on_delivery_moves_uses_the_sale_line(tmp_path):

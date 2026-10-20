@@ -262,14 +262,12 @@ def test_waybills_come_from_connector_fields(odoo_engine):
     assert eng.odoo.get_waybill(o["WH/OUT/00080"])[:4] == b"%PDF"
 
 
-def test_tiktok_needs_on_screen_confirmation_then_books_courier(odoo_engine, tmp_path):
+def test_tiktok_courier_is_booked_by_printing_no_separate_step(odoo_engine, tmp_path):
     eng, fake = odoo_engine
-    assert "odoo:WH/OUT/00073" in eng.plan()["arrange"]
-    eng.wait(eng.start_print_all(arrange=False))
-    assert not any(c[1] == "action_tiktok_ship_order" for c in fake.calls)   # nothing booked without a yes
-    assert "odoo:WH/OUT/00073" not in eng.store.printed()
-
-    job = eng.wait(eng.start_print_one("odoo:WH/OUT/00073", arrange=True))
+    assert eng.plan()["arrange"] == []                                       # no "Book courier" any more
+    assert "odoo:WH/OUT/00073" in eng.plan()["ready"]
+    assert eng.state_of(by_name(eng)["WH/OUT/00073"], {}, {}) == "ready"
+    job = eng.wait(eng.start_print_one("odoo:WH/OUT/00073"))
     assert job.state == "done", job.as_dict()
     assert fake.wizard_vals == {"handover_method": "drop_off"}               # ship method from settings
     assert [c[1] for c in fake.calls if c[0] == "tiktok.picking.ship.wizard"][-1] == "action_confirm_ship"
@@ -302,11 +300,13 @@ def test_waybill_missing_never_printed_marked_or_noted(odoo_engine, tmp_path):
     res = {r.key: r for r in job.results}
     assert res["odoo:WH/OUT/00081"].error["code"] == "WAYBILL-MISSING"
     printed = eng.store.printed()
-    assert "odoo:WH/OUT/00081" not in printed and "odoo:WH/OUT/00073" not in printed
+    assert "odoo:WH/OUT/00081" not in printed
     assert "odoo:WH/OUT/00080" in printed and "odoo:WH/OUT/00090" in printed
+    assert "odoo:WH/OUT/00073" in printed                   # TikTok: Print all booked it and got the label
     notes = [c for c in fake.calls if c[1] == "message_post"]
-    assert [c[2][0] for c in notes] == [[80]]                 # only the order with a real waybill
-    assert "SPXMY0601278A" in notes[0][3]["body"] and "#278A" in notes[0][3]["body"]
+    assert sorted(c[2][0] for c in notes) == [[73], [80]]    # only orders with a real waybill
+    note80 = next(c for c in notes if c[2][0] == [80])
+    assert "SPXMY0601278A" in note80[3]["body"] and "#278A" in note80[3]["body"]
     assert by_name(eng)["WH/OUT/00081"].match_code == ""        # no made-up code like #0081
 
 
