@@ -217,10 +217,37 @@ class Engine:
             twin = platform.get(o.ref.get("platform_ref", ""))
             if twin:
                 twin.odoo_picking_id = o.odoo_picking_id
+                if twin.total is None:
+                    twin.total, twin.currency = o.total, o.currency
             else:
                 merged.append(o)
         far = datetime.max
         return sorted(merged, key=lambda o: (o.ship_by or far, o.source, o.order_id))
+
+    @property
+    def hold_incomplete(self) -> bool:
+        """Settings switch: never print an order that is missing its waybill or anything else it needs."""
+        return bool(self.cfg.get("app", {}).get("hold_incomplete", False))
+
+    def missing_info(self, o: Order) -> list[str]:
+        """What this order lacks for a complete print run. Waybill-missing orders are listed too, but
+        those are never printed whatever the switch says."""
+        out = []
+        if not o.items:
+            out.append("no products")
+        if not o.has_waybill:
+            out.append("no waybill (not a Shopee/TikTok order)")
+        elif o.waybill_missing:
+            out.append("no waybill yet")
+        elif not o.tracking and not o.needs_arrange:
+            out.append("no tracking number")
+        unknown = [i.sku or i.name for i in o.items if not self.catalog.lookup(i)[1]]
+        if unknown:
+            out.append("not in label list: " + ", ".join(unknown))
+        return out
+
+    def held(self, o: Order) -> bool:
+        return self.hold_incomplete and not o.waybill_missing and bool(self.missing_info(o))
 
     def state_of(self, o: Order, printed: dict, packed: dict) -> str:
         if o.key in packed:
@@ -229,15 +256,17 @@ class Engine:
             return "printed"
         if o.key in self.busy_keys:
             return "busy"
-        if o.needs_arrange:
-            return "arrange"
         if o.waybill_missing:
             return "waybill_missing"
+        if self.held(o):
+            return "held"
+        if o.needs_arrange:
+            return "arrange"
         return "ready"
 
     def pending(self, include_arrange: bool = False) -> list[Order]:
         printed = self.store.printed()
-        todo = [o for o in self.orders if o.key not in printed and not o.waybill_missing
+        todo = [o for o in self.orders if o.key not in printed and not o.waybill_missing and not self.held(o)
                 and (include_arrange or not o.needs_arrange)]
         if self.cfg.get("app", {}).get("only_due_today"):
             end = datetime.now().replace(hour=23, minute=59, second=59)
@@ -251,8 +280,9 @@ class Engine:
         return {
             "ready": [o.key for o in ready],
             "labels": sum(o.unit_count for o in ready),
-            "arrange": [o.key for o in unprinted if o.needs_arrange],
+            "arrange": [o.key for o in unprinted if o.needs_arrange and not self.held(o)],
             "missing": [o.key for o in unprinted if o.waybill_missing],
+            "held": [o.key for o in unprinted if self.held(o)],
             "ship_method": self.ship_method,
         }
 
@@ -320,18 +350,20 @@ class Engine:
 
     # ---- printing -----------------------------------------------------------------------------
 
-    def print_order(self, order: Order, job: Job | None = None, arrange_ok: bool = False) -> Result:
+    def print_order(self, order: Order, job: Job | None = None, arrange_ok: bool = False,
+                    hold: bool | None = None) -> Result:
+        """`hold`: refuse when info is missing (default: the Settings switch; False = "Print anyway")."""
+        hold = self.hold_incomplete if hold is None else hold
         src = self._by_name(order.source)
         code = order.match_code
         tag = f"Order #{code}" if code else f"Order {order.order_id}"
-        sent_any = False
-        step = "starting"
+        prog = {"step": "starting", "sent": False}
         try:
             if order.has_waybill:
                 if order.needs_arrange:
                     if not arrange_ok:
                         raise PackError("TIKTOK-ARRANGE", "booking courier", "not confirmed on screen")
-                    step = "booking TikTok courier"
+                    prog["step"] = "booking TikTok courier"
                     if job:
                         job.current = f"{tag}: booking courier"
                     order = (src.arrange(order, self.ship_method) if isinstance(src, OdooSource)
@@ -341,39 +373,20 @@ class Engine:
                     tag = f"Order #{code}" if code else f"Order {order.order_id}"
                 if not order.waybill_ready:
                     raise PackError("WAYBILL-MISSING", "fetching waybill")
-                step = "fetching waybill"
+                prog["step"] = "fetching waybill"
                 waybill = src.get_waybill(order)
                 if not order.tracking:  # the waybill itself carries it; Odoo's copy can lag behind
+                    if hold:
+                        raise PackError("INFO-MISSING", "checking tracking number", "no tracking number")
                     self.log.add("info", "Waybill found, but Odoo has no tracking number for it yet. Printed anyway.",
                                  key=order.key)
-                step = "printing waybill on the waybill printer"
-                if job:
-                    job.current = f"{tag}: waybill"
-                if waybill[:4] == b"%PDF":
-                    self.waybill_printer.print_pdf(waybill, f"{order.source}-{order.order_id}-waybill",
-                                                   detail=f"{tag}, waybill")
-                else:
-                    import io
-                    from PIL import Image
-                    self.waybill_printer.print_image(Image.open(io.BytesIO(waybill)),
-                                                     f"{order.source}-{order.order_id}-waybill",
-                                                     detail=f"{tag}, waybill", native=True)
-                sent_any = True
+                self._send_waybill(order, waybill, tag, job, prog)
             labels = labels_for_order(order, self.catalog, self.label_cfg)
-            for n, (img, item, _) in enumerate(labels, 1):
-                step = f"printing label {n} of {len(labels)} on the label printer"
-                if job:
-                    job.current = f"{tag}: label {n} of {len(labels)}"
-                self.label_printer.print_image(img, f"{order.source}-{order.order_id}-{n:02d}",
-                                               detail=f"{tag}, label {n} of {len(labels)}")
-                sent_any = True
-            if labels:
-                step = "feeding separator label"
-                self.label_printer.feed_separator(self.label_cfg.get("separator", "blank"), detail=f"{tag}, done")
+            self._send_labels(order, labels, tag, job, prog)
         except Exception as e:
-            err = classify(e, step)
-            if sent_any:
-                err = PackError("PRINT-PARTIAL", step, f"{err.code}: {err.detail or err.step}")
+            err = classify(e, prog["step"])
+            if prog["sent"]:
+                err = PackError("PRINT-PARTIAL", prog["step"], f"{err.code}: {err.detail or err.step}")
             self.log.add("error", err.text, err.code, order.key)
             return Result(order.key, False, err.text, error=err.as_dict())
 
@@ -390,51 +403,119 @@ class Engine:
         self.log.add("info", f"Printed {msg}", key=order.key)
         return Result(order.key, True, msg, len(labels), guessed)
 
+    def _send_waybill(self, order: Order, waybill: bytes, tag: str, job: Job | None, prog: dict) -> None:
+        prog["step"] = "printing waybill on the waybill printer"
+        if job:
+            job.current = f"{tag}: waybill"
+        if waybill[:4] == b"%PDF":
+            self.waybill_printer.print_pdf(waybill, f"{order.source}-{order.order_id}-waybill",
+                                           detail=f"{tag}, waybill")
+        else:
+            import io
+            from PIL import Image
+            self.waybill_printer.print_image(Image.open(io.BytesIO(waybill)),
+                                             f"{order.source}-{order.order_id}-waybill",
+                                             detail=f"{tag}, waybill", native=True)
+        prog["sent"] = True
+
+    def _send_labels(self, order: Order, labels: list, tag: str, job: Job | None, prog: dict) -> None:
+        """An order's bottle labels, then the separator. `prog` keeps the step for error messages."""
+        for n, (img, item, _) in enumerate(labels, 1):
+            prog["step"] = f"printing label {n} of {len(labels)} on the label printer"
+            if job:
+                job.current = f"{tag}: label {n} of {len(labels)}"
+            self.label_printer.print_image(img, f"{order.source}-{order.order_id}-{n:02d}",
+                                           detail=f"{tag}, label {n} of {len(labels)}")
+            prog["sent"] = True
+        if labels:
+            prog["step"] = "feeding separator label"
+            self.label_printer.feed_separator(self.label_cfg.get("separator", "blank"), detail=f"{tag}, done")
+
+    def reprint_part(self, order: Order, part: str, job: Job | None = None) -> Result:
+        """Print just the waybill or just the bottle labels of an order again. Changes nothing on
+        record: the order keeps its printed/unprinted state and Odoo gets no note."""
+        code = order.match_code
+        tag = f"Order #{code}" if code else f"Order {order.order_id}"
+        prog = {"step": "starting", "sent": False}
+        n = 0
+        try:
+            if part == "waybill":
+                if not order.has_waybill or not order.waybill_ready:
+                    raise PackError("WAYBILL-MISSING", "fetching waybill")
+                prog["step"] = "fetching waybill"
+                self._send_waybill(order, self._by_name(order.source).get_waybill(order), tag, job, prog)
+                msg = "waybill reprinted"
+            else:
+                labels = labels_for_order(order, self.catalog, self.label_cfg)
+                if not labels:
+                    raise PackError("INFO-MISSING", "making labels", "no products on this order")
+                self._send_labels(order, labels, tag, job, prog)
+                n = len(labels)
+                msg = f"{n} label{'s' if n != 1 else ''} reprinted"
+        except Exception as e:
+            err = classify(e, prog["step"])
+            if prog["sent"]:
+                err = PackError("PRINT-PARTIAL", prog["step"], f"{err.code}: {err.detail or err.step}")
+            self.log.add("error", err.text, err.code, order.key)
+            return Result(order.key, False, err.text, error=err.as_dict())
+        self.log.add("info", msg.capitalize(), key=order.key)
+        return Result(order.key, True, msg, n)
+
     def _replace_order(self, order: Order) -> None:
         with self.lock:
             self.orders = [order if o.key == order.key else o for o in self.orders]
 
     def _run_orders(self, job: Job, orders: list[Order], arrange_ok: bool) -> None:
         job.total = len(orders)
+        first = len(job.results)  # results before this are orders skipped on purpose, not failures
         for o in orders:
             job.current = o.key
             job.results.append(self.print_order(o, job, arrange_ok))
             job.done += 1
-        bad = [r for r in job.results if not r.ok]
+        bad = [r for r in job.results[first:] if not r.ok]
         job.summary = (f"Printed {job.done - len(bad)} of {job.total} orders"
                        + (f", {len(bad)} with problems" if bad else ""))
-        if bad and len(bad) == len(job.results):
+        if bad and len(bad) == len(job.results) - first:
             job.error = bad[0].error
 
     def start_print_all(self, arrange: bool = False) -> Job:
         """Print every pending order. Orders needing a TikTok courier booking are included only when
         `arrange` (the user confirmed booking on screen). Waybill-missing orders are reported, not printed."""
         orders = self.pending(include_arrange=arrange)
-        missing = [o for o in self.orders if o.waybill_missing and o.key not in self.store.printed()]
+        printed = self.store.printed()
+        missing = [o for o in self.orders if o.waybill_missing and o.key not in printed]
+        held = [o for o in self.orders if self.held(o) and o.key not in printed]
 
         def work(job: Job):
             for o in missing:
                 err = PackError("WAYBILL-MISSING", "checking waybill")
                 job.results.append(Result(o.key, False, err.text, error=err.as_dict()))
                 self.log.add("error", "Skipped: " + err.text, err.code, o.key)
+            for o in held:
+                err = PackError("INFO-MISSING", "checking order", "; ".join(self.missing_info(o)))
+                job.results.append(Result(o.key, False, err.text, error=err.as_dict()))
+                self.log.add("error", "Skipped: " + err.text, err.code, o.key)
             self._run_orders(job, orders, arrange)
             if missing:
                 job.summary += f"; {len(missing)} waiting for a waybill"
+            if held:
+                job.summary += f"; {len(held)} held for missing info"
 
         return self.submit("print_all", "Print all", work, {o.key for o in orders})
 
-    def start_print_one(self, key: str, force: bool = False, arrange: bool = False) -> Job | dict:
-        order = next((o for o in self.orders if o.key == key), None)
-        if not order:
-            raise PackError("CONFIG", "finding order", "order not in the current list; press Refresh")
+    def start_print_one(self, key: str, force: bool = False, arrange: bool = False,
+                        allow_incomplete: bool = False) -> Job | dict:
+        order = self._order(key)
         printed_at = self.store.printed().get(key)
         if printed_at and not force:
             return {"needs_confirm": True, "printed_at": printed_at}
+        if self.held(order) and not allow_incomplete:
+            return {"needs_confirm_incomplete": True, "missing": self.missing_info(order)}
 
         def work(job: Job):
             # The printed record is only replaced when the new print fully succeeds, so a failed
             # reprint leaves the earlier successful print on record.
-            r = self.print_order(order, job, arrange)
+            r = self.print_order(order, job, arrange, hold=self.hold_incomplete and not allow_incomplete)
             job.results.append(r)
             job.total = job.done = 1
             job.summary = r.message
@@ -443,6 +524,28 @@ class Engine:
 
         return self.submit("print_one", f"{'Reprint' if printed_at else 'Print'} {key.split(':', 1)[-1]}",
                            work, {key})
+
+    def start_reprint(self, key: str, part: str) -> Job:
+        if part not in ("waybill", "labels"):
+            raise PackError("CONFIG", "reprinting", f"unknown part {part!r}")
+        order = self._order(key)
+
+        def work(job: Job):
+            r = self.reprint_part(order, part, job)
+            job.results.append(r)
+            job.total = job.done = 1
+            job.summary = r.message
+            if not r.ok:
+                job.error = r.error
+
+        what = "waybill" if part == "waybill" else "labels"
+        return self.submit("reprint", f"Reprint {what} {key.split(':', 1)[-1]}", work, {key})
+
+    def _order(self, key: str) -> Order:
+        order = next((o for o in self.orders if o.key == key), None)
+        if not order:
+            raise PackError("CONFIG", "finding order", "order not in the current list; press Refresh")
+        return order
 
     # ---- refresh chain ------------------------------------------------------------------------
 

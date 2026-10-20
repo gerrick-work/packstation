@@ -4,6 +4,7 @@
 [app]
 # data_dir = "data"          # printed-order log, product list, packstation.log, platform tokens
 only_due_today = false       # true: Print all skips orders whose ship-by date is after today
+hold_incomplete = false      # true: never print an order missing its waybill, tracking number or a label-list product
 host = "0.0.0.0"             # 0.0.0.0 = phones and iPads on the same Wi-Fi can open it
 port = 8765
 pin = ""                     # 4 digits to require a PIN on other devices (the Mac itself never asks)

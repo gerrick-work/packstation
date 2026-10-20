@@ -15,6 +15,13 @@ two AiYin E40 Pro printers over Bluetooth.
   when all of it was sent. TikTok orders still needing a courier are booked only after you confirm
   on screen (drop-off or pickup, set in Settings).
 - Orders with no waybill show **WAYBILL-MISSING**: never printed, never marked, no Odoo note.
+- **Hold orders with missing info** (switch under Print all): Print all also skips any order with no
+  waybill (e.g. Odoo-only orders), no tracking number, or a product that isn't in the label list
+  (**INFO-MISSING**). Printing one of those on its own asks first ("Print anyway").
+- Each order shows its **grand total** (from Shopee, TikTok or the Odoo sale order). Orders can be
+  shown as **cards or a list** (the toggle top right of the orders; each device remembers its choice).
+- **Reprint one part**: from a selected order, reprint just its waybill or just all its bottle
+  labels. A part reprint doesn't change whether the order counts as printed.
 - **Bottle labels** use one fixed template (Label Expert "Atlas Origin Finalv1"); the product list
   is edited on the Labels screen and kept in `data/products.csv`. Default brand: "atlas origins".
 - **Printers** screen: calibration page (border, mm ruler, centre cross), nudge buttons for
@@ -22,7 +29,7 @@ two AiYin E40 Pro printers over Bluetooth.
 - Live status per printer ("Order #278A, label 2 of 3", sending %), persistent results with times,
   a lock per order across all devices, and "Already printed at HH:MM, print again?".
 - Fixed **error codes** (ODOO-AUTH, ODOO-NET, ODOO-CRON, WAYBILL-MISSING, TIKTOK-ARRANGE,
-  BT-NOTFOUND, BT-PERMISSION, BT-SEND, PRINT-PARTIAL, CONFIG) on cards, the status bar, the Log
+  BT-NOTFOUND, BT-PERMISSION, BT-SEND, PRINT-PARTIAL, CONFIG, INFO-MISSING) on cards, the status bar, the Log
   screen and `data/packstation.log`.
 - Settings: TikTok courier type, default brand, optional 4-digit PIN for other devices,
   **Install an update** (choose the GitHub ZIP; keeps config.toml and data/) and **Restart**.

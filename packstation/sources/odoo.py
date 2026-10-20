@@ -172,10 +172,12 @@ class OdooSource(Source):
         prods = {p["id"]: p for p in self._x("product.product", "read", prod_ids,
                                              fields=["default_code", "display_name"], context=ctx)} if prod_ids else {}
         sale_ids = [p["sale_id"][0] for p in pickings if p.get("sale_id")]
-        refs = {s["id"]: s.get(self.ref_field) or "" for s in self._x(
-            "sale.order", "read", sale_ids, fields=[self.ref_field], context=ctx)} if sale_ids else {}
+        sales = self._x("sale.order", "read", sale_ids, fields=[self.ref_field, "amount_total", "currency_id"],
+                        context=ctx) if sale_ids else []
+        refs = {s["id"]: s.get(self.ref_field) or "" for s in sales}
+        totals = {s["id"]: (s.get("amount_total"), (s.get("currency_id") or [0, ""])[1]) for s in sales}
         found = self._attached_labels(pickings)
-        return [self._to_order(p, moves, prods, refs, found.get(p["id"])) for p in pickings]
+        return [self._to_order(p, moves, prods, refs, found.get(p["id"]), totals) for p in pickings]
 
     _LABEL_WORDS = ("label", "waybill", "awb", "airway", "shipping", "consign", "tiktok", "shopee")
 
@@ -325,7 +327,8 @@ class OdooSource(Source):
             return "shopee"
         return ""
 
-    def _to_order(self, p: dict, moves: dict, prods: dict, refs: dict, attached: int | None = None) -> Order:
+    def _to_order(self, p: dict, moves: dict, prods: dict, refs: dict, attached: int | None = None,
+                  totals: dict | None = None) -> Order:
         items = []
         for mid in p.get("move_ids", []):
             m = moves.get(mid)
@@ -351,6 +354,7 @@ class OdooSource(Source):
             tracking = next((v for k, v in p.items() if k.startswith(platform + "_") and "tracking" in k
                              and isinstance(v, str) and v), None)
         ref = refs.get(p["sale_id"][0], "") if p.get("sale_id") else ""
+        total, currency = (totals or {}).get(p["sale_id"][0], (None, "")) if p.get("sale_id") else (None, "")
         return Order(
             source=self.name,
             order_id=p["name"],
@@ -365,6 +369,8 @@ class OdooSource(Source):
             odoo_picking_id=p["id"],
             ref={"platform_ref": str(ref).strip(), "origin": p.get("origin") or "", "label": list(label) if label else None,
                  "label_attachment_id": label[1] if label and label[0] == "att" else None},
+            total=float(total) if total is not None and total is not False else None,
+            currency=currency or "",
         )
 
     def _reload(self, order: Order) -> Order:
@@ -377,6 +383,7 @@ class OdooSource(Source):
                     context=dict(self.ctx(), bin_size=True))[0]
         fresh = self._to_order(p, {}, {}, {}, self._attached_labels([p]).get(p["id"]))
         fresh.items, fresh.ref["platform_ref"] = order.items, order.ref.get("platform_ref", "")
+        fresh.total, fresh.currency = order.total, order.currency
         return fresh
 
     # ---- waybills ---------------------------------------------------------------------

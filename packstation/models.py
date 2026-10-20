@@ -26,6 +26,8 @@ class Order:
     platform: str = ""               # "shopee" / "tiktok" when the order came from a marketplace
     odoo_picking_id: int | None = None
     ref: dict = field(default_factory=dict)   # source-specific ids (package ids, attachment ids etc.)
+    total: float | None = None       # the order's grand total as the buyer paid it, when the source says
+    currency: str = ""
 
     @property
     def key(self) -> str:

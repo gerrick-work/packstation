@@ -115,7 +115,7 @@ class ShopeeSource(Source):
         for i in range(0, len(sns), 50):
             r = self._call("GET", "/api/v2/order/get_order_detail", {
                 "order_sn_list": ",".join(sns[i:i + 50]),
-                "response_optional_fields": "item_list,package_list,shipping_carrier",
+                "response_optional_fields": "item_list,package_list,shipping_carrier,total_amount,currency",
             })
             out += r.get("order_list", [])
         return out
@@ -150,6 +150,8 @@ class ShopeeSource(Source):
             platform="shopee",
             ref={"package_number": packages[0].get("package_number") if len(packages) == 1 else None,
                  "carrier": d.get("shipping_carrier", "")},
+            total=float(d["total_amount"]) if d.get("total_amount") is not None else None,
+            currency=d.get("currency", ""),
         )
         if not order.needs_arrange:
             order.tracking = self._tracking(order.order_id)

@@ -18,6 +18,8 @@ CODES = {
     "BT-SEND": "The printer stopped receiving part-way. Check it's on and has labels, then print again.",
     "PRINT-PARTIAL": "Only part of this order printed. It is NOT marked printed; print it again.",
     "CONFIG": "A setting is missing or wrong in Settings.",
+    "INFO-MISSING": "Held back because something this order needs is missing. Fix it, or turn off "
+                    "\"Hold orders with missing info\".",
 }
 
 

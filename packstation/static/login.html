@@ -1,15 +1,16 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pack Station</title><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<meta name="theme-color" content="#2C463A">
+<meta name="theme-color" content="#FFFFFF">
 <style>
-:root{--g:#2C463A}*{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:grid;place-items:center;background:#F3F5F3;font:17px -apple-system,system-ui,sans-serif;color:#111}
-.box{background:#fff;border-radius:24px;padding:32px 28px;width:min(360px,92vw);text-align:center;border:1px solid #E3E7E4}
-h1{color:var(--g);margin:0 0 6px;font-size:24px}p{color:#5f6b64;margin:0 0 20px}
-input{font:600 32px ui-monospace,Menlo,monospace;letter-spacing:12px;text-align:center;width:100%;padding:14px;border-radius:14px;border:2px solid #E3E7E4}
-input:focus{outline:none;border-color:#4F7A60}
-button{margin-top:16px;width:100%;padding:16px;border:0;border-radius:14px;font:700 18px inherit;color:#fff;background:linear-gradient(135deg,#1F3429,#2C463A 45%,#4F7A60)}
-.bad{color:#B3261E;min-height:22px;margin-top:12px}
+:root{--cta:#2C463A;--ink:#1D1D1F;--muted:#6E6E73;--fill:#F5F5F7}*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#fff;font:400 17px/1.4 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:var(--ink)}
+.box{padding:32px 28px;width:min(360px,92vw);text-align:center}
+h1{margin:0 0 6px;font-size:28px;font-weight:600;letter-spacing:-.02em}p{color:var(--muted);margin:0 0 24px}
+input{font:400 32px ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:12px;text-align:center;width:100%;padding:14px;border-radius:14px;border:0;background:var(--fill);color:var(--ink)}
+input:focus{outline:2px solid var(--ink);outline-offset:2px}
+button{margin-top:16px;width:100%;padding:16px;border:0;border-radius:14px;font:400 18px -apple-system,system-ui,sans-serif;color:#fff;background:var(--cta);transition:transform .1s ease-out}
+button:active{transform:scale(.97)}
+.bad{color:#C4281C;min-height:22px;margin-top:12px}
 </style></head><body>
 <form class="box" id="f"><h1>Pack Station</h1><p>Enter the 4-digit PIN</p>
 <input id="pin" inputmode="numeric" maxlength="4" autocomplete="off" autofocus>

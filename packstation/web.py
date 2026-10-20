@@ -104,8 +104,11 @@ def create_app(engine: Engine) -> Flask:
         rows = rows if rows is not None else engine.store.printed_rows()
         state = engine.state_of(o, printed, packed)
         error = None
+        missing = engine.missing_info(o)
         if state == "waybill_missing":
             error = PackError("WAYBILL-MISSING", "checking waybill").as_dict()
+        elif state == "held":
+            error = PackError("INFO-MISSING", "checking order", "; ".join(missing)).as_dict()
         else:  # last failure for this order in recent jobs
             for j in engine.jobs:
                 r = next((r for r in j.results if r.key == o.key), None)
@@ -121,6 +124,7 @@ def create_app(engine: Engine) -> Flask:
             "units": o.unit_count, "has_waybill": o.has_waybill, "waybill_ready": o.waybill_ready,
             "printed_at": printed.get(o.key), "packed_at": packed.get(o.key), "error": error,
             "printed_labels": (rows.get(o.key) or {}).get("labels"),
+            "total": o.total, "currency": o.currency, "missing": missing,
         }
 
     @app.get("/")
@@ -131,7 +135,7 @@ def create_app(engine: Engine) -> Flask:
     def manifest():
         return jsonify({
             "name": "Pack Station", "short_name": "Pack Station", "start_url": "/", "display": "standalone",
-            "background_color": "#F3F5F3", "theme_color": "#2C463A",
+            "background_color": "#FFFFFF", "theme_color": "#FFFFFF",
             "icons": [{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
                       {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}],
         })
@@ -174,6 +178,7 @@ def create_app(engine: Engine) -> Flask:
                 "tiktok_ship_method": engine.ship_method,
                 "brand": engine.catalog.default_brand,
                 "pin_set": bool(pin()),
+                "hold_incomplete": engine.hold_incomplete,
                 "odoo": bool(engine.odoo),
                 "picking_states": engine.odoo.states if engine.odoo else ["assigned"],
                 "picking_type_codes": engine.odoo.type_codes if engine.odoo else ["outgoing"],
@@ -207,12 +212,21 @@ def create_app(engine: Engine) -> Flask:
     def print_one(key):
         body = request.get_json(silent=True) or {}
         try:
-            r = engine.start_print_one(key, force=bool(body.get("force")), arrange=bool(body.get("arrange")))
+            r = engine.start_print_one(key, force=bool(body.get("force")), arrange=bool(body.get("arrange")),
+                                       allow_incomplete=bool(body.get("allow_incomplete")))
         except Exception as e:
             return err(e)
         if isinstance(r, dict):
             return jsonify(ok=False, **r), 409
         return jsonify(ok=True, job=r.as_dict())
+
+    @app.post("/api/reprint/<path:key>")
+    def reprint(key):
+        part = (request.get_json(silent=True) or {}).get("part", "")
+        try:
+            return jsonify(ok=True, job=engine.start_reprint(key, part).as_dict())
+        except Exception as e:
+            return err(e)
 
     @app.post("/api/packed/<path:key>")
     def packed(key):
@@ -341,6 +355,8 @@ def create_app(engine: Engine) -> Flask:
             if body.get("include_dropship") is not None:
                 codes = ["outgoing", "dropship"] if body["include_dropship"] else ["outgoing"]
                 engine.save_settings("odoo", {"picking_type_codes": codes})
+            if body.get("hold_incomplete") is not None:
+                engine.save_settings("app", {"hold_incomplete": bool(body["hold_incomplete"])})
             if "brand" in body and str(body["brand"]).strip():
                 engine.save_settings("labels", {"brand": str(body["brand"]).strip()})
             if "pin" in body:

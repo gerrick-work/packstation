@@ -102,6 +102,7 @@ class TikTokSource(Source):
         packages = [p["id"] for p in d.get("packages", []) if p.get("id")]
         status = d.get("status", "")
         due = d.get("rts_sla_time") or d.get("shipping_due_time")
+        pay = d.get("payment") or {}
         return Order(
             source=self.name,
             order_id=str(d["id"]),
@@ -113,6 +114,8 @@ class TikTokSource(Source):
             waybill_ready=status != "AWAITING_SHIPMENT",
             platform="tiktok",
             ref={"package_ids": packages},
+            total=float(pay["total_amount"]) if pay.get("total_amount") not in (None, "") else None,
+            currency=pay.get("currency", ""),
         )
 
     def list_orders(self) -> list[Order]:
