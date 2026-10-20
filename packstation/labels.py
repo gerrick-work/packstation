@@ -168,6 +168,9 @@ class Catalog:
         `bottles` says how many labels one unit needs (a "15x2" pack: 2 labels of 15g)."""
         hit = self.rows.get(item.sku.upper()) if item.sku else None
         pack = parse_pack(item.name)
+        if not hit:  # no SKU match (e.g. a marketplace item Odoo couldn't link): try the product's name
+            title = _pack_title(item.name, pack[2]) if pack else (SIZE_RE.match(item.name.strip()) or [0, item.name])[1]
+            hit = self._by_title(title.strip(), "" if pack else self._guess_size(item.name))
         if hit:
             if hit.bottles or not pack:
                 return hit, True
@@ -179,6 +182,17 @@ class Catalog:
         title, size = (m.group(1).strip(), m.group(2).replace(" ", "")) if m else (item.name.strip(), "")
         return LabelData(title or item.sku, size, self.default_brand, ""), False
 
+
+    def _by_title(self, title: str, size: str) -> LabelData | None:
+        """A product-list row with this title (and size, when the name has one), if exactly one."""
+        t, z = title.lower(), size.lower().replace(" ", "")
+        hits = [d for d in self.rows.values() if d.title.lower() == t and (not z or d.size.lower() == z)]
+        return hits[0] if len(hits) == 1 and t else None
+
+    @staticmethod
+    def _guess_size(name: str) -> str:
+        m = SIZE_RE.match(name.strip())
+        return m.group(2).replace(" ", "") if m else ""
 
     def label_count(self, order: Order) -> int:
         return sum(max(i.qty, 0) * max(self.lookup(i)[0].bottles, 1) for i in order.items)

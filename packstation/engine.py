@@ -241,7 +241,11 @@ class Engine:
             out.append("no waybill yet")
         elif not o.tracking and not o.needs_arrange:
             out.append("no tracking number")
-        unknown = [i.sku or i.name for i in o.items if not self.catalog.lookup(i)[1]]
+        from .sources.odoo import PLACEHOLDER_RE
+        vague = [i.name for i in o.items if PLACEHOLDER_RE.match(i.name)]
+        if vague:
+            out.append("Odoo has no product name for: " + ", ".join(vague))
+        unknown = [i.sku or i.name for i in o.items if not self.catalog.lookup(i)[1] and i.name not in vague]
         if unknown:
             out.append("not in label list: " + ", ".join(unknown))
         return out

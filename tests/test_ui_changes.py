@@ -162,3 +162,54 @@ def test_print_all_counts_bundle_labels(tmp_path):
     eng = demo_engine(tmp_path)
     by_name(eng)["DEMO10001"].items = [Item("", "Hedione (15x2) Best Value", 1)]
     assert eng.plan()["labels"] == 2 + 2 + 3
+
+
+# ---------------------------------------------------------------- "TikTok Shop Sale" catch-all product
+
+def placeholder_odoo(line_name):
+    """FakeOdoo where WH/OUT/00073's TikTok item landed on Odoo's catch-all "TikTok Shop Sale"."""
+    fake = FakeOdoo()
+    real = fake.__call__
+
+    def rpc(model, method, *a, **kw):
+        if model == "stock.move" and method == "read":
+            return [dict(m, sale_line_id=[700 + m["id"], "line"]) for m in real(model, method, *a, **kw)]
+        if model == "product.product" and method == "read":
+            return [dict(p, default_code=False, display_name="TikTok Shop Sale") if p["id"] == 101 else p
+                    for p in real(model, method, *a, **kw)]
+        if model == "sale.order.line" and method == "read":
+            fake.calls.append((model, method, a, kw))
+            return [{"id": i, "name": line_name} for i in a[0]]
+        return real(model, method, *a, **kw)
+
+    return fake, rpc
+
+
+def test_catch_all_product_uses_the_sale_line_item_name(tmp_path):
+    fake, rpc = placeholder_odoo("TikTok Shop Sale\n[ML-HED-BV] Hedione (15x2) Best Value")
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=rpc, sleep=lambda s: None)])
+    eng.scan()
+    item = by_name(eng)["WH/OUT/00073"].items[0]
+    assert (item.sku, item.name) == ("ML-HED-BV", "Hedione (15x2) Best Value")
+    assert by_name(eng)["WH/OUT/00080"].items[0].name == "Linalool 102 3g"   # real products untouched
+    lines = [c for c in fake.calls if c[0] == "sale.order.line"]
+    assert len(lines) == 1 and lines[0][2][0] == [701]                        # only the catch-all line read
+    data, _ = eng.catalog.lookup(item)
+    assert (data.title, data.size, data.bottles) == ("Hedione", "15g", 2)
+
+
+def test_catch_all_product_without_a_name_is_flagged(tmp_path):
+    _, rpc = placeholder_odoo("TikTok Shop Sale")
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=rpc, sleep=lambda s: None)])
+    eng.scan()
+    o = by_name(eng)["WH/OUT/00073"]
+    assert "Odoo has no product name for: TikTok Shop Sale" in eng.missing_info(o)
+
+
+def test_item_without_sku_matches_the_label_list_by_name(tmp_path):
+    cat = Catalog(tmp_path / "p.csv")
+    cat.save([{"sku": "ML-HED-15", "title": "Hedione", "size": "15g", "icon": "corrosive"}])
+    data, known = cat.lookup(Item("", "Hedione (15x2) Best Value", 1))
+    assert known and (data.icon, data.size, data.bottles) == ("corrosive", "15g", 2)
+    assert cat.lookup(Item("", "Hedione 15g", 1))[1]
+    assert not cat.lookup(Item("", "Hedione 30g", 1))[1]                      # different size: no match

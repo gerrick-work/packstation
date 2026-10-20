@@ -22,6 +22,10 @@ two AiYin E40 Pro printers over Bluetooth.
   shown as **cards or a list** (the toggle top right of the orders; each device remembers its choice).
 - **Reprint one part**: from a selected order, reprint just its waybill or just all its bottle
   labels. A part reprint doesn't change whether the order counts as printed.
+- **TikTok/Shopee items Odoo couldn't match** land on a catch-all product like "TikTok Shop Sale".
+  Pack Station then takes the real item name (and "[SKU]", if given) from the sale order line, so
+  the bottle label shows the product, not "TikTok Shop Sale". Items without a SKU are matched to the
+  label list by name. If Odoo has no item name at all, the order shows it under missing info.
 - **Bundles** ("Hedione (15x2) Best Value", "15g x 2", "2 x 15g") print one label per bottle at the
   bottle's size: 2 labels of 15g, not 1 of 30g. The **Bottles** column on the Labels screen sets it
   per product; left empty, it's read from the product name.

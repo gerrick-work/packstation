@@ -25,6 +25,10 @@ from ..models import Item, Order
 from . import Source
 
 DEFAULT_CRONS = [73, 77, 74]  # Shopee sync orders, TikTok sync orders, Shopee sync shipping labels
+# The connectors put marketplace items they can't match to an Odoo product (by SKU) on a catch-all
+# product such as "TikTok Shop Sale". The real item is then only in the sale order line's description.
+PLACEHOLDER_RE = re.compile(r"^\s*(\[[^\]]*\]\s*)?(tik\s*tok|shopee|lazada|marketplace)\b.*\b(sale|sales|product|item|order)s?\s*$",
+                            re.I)
 
 
 class _TimeoutTransport(xmlrpc.client.SafeTransport):
@@ -62,6 +66,7 @@ class OdooSource(Source):
         self.all_companies = bool(cfg.get("all_companies", True))
         # Odoo operation types to read: "outgoing" = Delivery. Add e.g. "dropship" if a shop ships that way.
         self.type_codes = list(cfg.get("picking_type_codes", ["outgoing"]))
+        self.placeholders = {str(n).strip().lower() for n in cfg.get("placeholder_products", [])}
         self._ctx = None
         self.sleep = sleep
         self._uid = None
@@ -167,10 +172,12 @@ class OdooSource(Source):
                            fields=read, context=bctx)
         move_ids = [m for p in pickings for m in p.get("move_ids", [])]
         moves = {m["id"]: m for m in self._x("stock.move", "read", move_ids,
-                                             fields=["product_id", "product_uom_qty"], context=ctx)} if move_ids else {}
+                                             fields=["product_id", "product_uom_qty", "sale_line_id"],
+                                             context=ctx)} if move_ids else {}
         prod_ids = list({m["product_id"][0] for m in moves.values() if m.get("product_id")})
         prods = {p["id"]: p for p in self._x("product.product", "read", prod_ids,
                                              fields=["default_code", "display_name"], context=ctx)} if prod_ids else {}
+        self._real_items(moves, prods, ctx)
         sale_ids = [p["sale_id"][0] for p in pickings if p.get("sale_id")]
         sales = self._x("sale.order", "read", sale_ids, fields=[self.ref_field, "amount_total", "currency_id"],
                         context=ctx) if sale_ids else []
@@ -178,6 +185,24 @@ class OdooSource(Source):
         totals = {s["id"]: (s.get("amount_total"), (s.get("currency_id") or [0, ""])[1]) for s in sales}
         found = self._attached_labels(pickings)
         return [self._to_order(p, moves, prods, refs, found.get(p["id"]), totals) for p in pickings]
+
+    def is_placeholder(self, prod: dict) -> bool:
+        name = (prod.get("display_name") or "").strip()
+        return name.lower() in self.placeholders or bool(PLACEHOLDER_RE.match(name))
+
+    def _real_items(self, moves: dict, prods: dict, ctx: dict) -> None:
+        """Moves on a catch-all product ("TikTok Shop Sale") get the item's real name, and SKU when
+        given as "[SKU] name", from their sale order line. Stored on the move as _name/_sku."""
+        todo = {m["sale_line_id"][0]: m for m in moves.values()
+                if m.get("product_id") and m.get("sale_line_id")
+                and self.is_placeholder(prods.get(m["product_id"][0], {}))}
+        if not todo:
+            return
+        for line in self._x("sale.order.line", "read", list(todo), fields=["name"], context=ctx):
+            prod = prods.get(todo[line["id"]]["product_id"][0], {})
+            sku, name = _line_item(line.get("name") or "", prod.get("display_name") or "")
+            if name:
+                todo[line["id"]].update(_name=name, _sku=sku)
 
     _LABEL_WORDS = ("label", "waybill", "awb", "airway", "shipping", "consign", "tiktok", "shopee")
 
@@ -335,7 +360,8 @@ class OdooSource(Source):
             if not m or not m.get("product_id"):
                 continue
             prod = prods.get(m["product_id"][0], {})
-            items.append(Item(sku=prod.get("default_code") or "", name=prod.get("display_name", ""),
+            items.append(Item(sku=m.get("_sku", prod.get("default_code") or ""),
+                              name=m.get("_name") or prod.get("display_name", ""),
                               qty=int(round(m["product_uom_qty"]))))
         when = p.get("date_deadline") or p.get("scheduled_date")
         platform = self._platform(p)
@@ -516,6 +542,19 @@ class OdooSource(Source):
     def note_printed(self, picking_id: int, text: str) -> None:
         if self.post_note:
             self._x("stock.picking", "message_post", [picking_id], body=text, context=self.ctx())
+
+
+def _line_item(text: str, placeholder: str) -> tuple[str, str]:
+    """(sku, name) of the marketplace item in a sale order line description, skipping the catch-all
+    product's own name. "[ML-HED-BV] Hedione (15x2) Best Value" -> ("ML-HED-BV", "Hedione (15x2) Best Value")."""
+    skip = {placeholder.strip().lower(), re.sub(r"^\[[^\]]*\]\s*", "", placeholder).strip().lower()}
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln or ln.lower() in skip or PLACEHOLDER_RE.match(ln):
+            continue
+        m = re.match(r"^\[([^\]]+)\]\s*(.*)$", ln)
+        return (m.group(1).strip(), m.group(2).strip()) if m else ("", ln)
+    return "", ""
 
 
 def _primary_button(arch: str) -> str | None:

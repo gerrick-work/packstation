@@ -514,7 +514,7 @@ def test_bottle_labels_have_no_match_code(tmp_path):
     order = Order("demo", "D1", [Item("X", "Sandalwood 3g", 1)], tracking="SPXMY0601278A")
     cat = Catalog(data_dir=tmp_path)
     with_setting = labels_for_order(order, cat, {"width_mm": 40, "height_mm": 20, "match_code": True})[0][0]
-    plain = render_product_label(LabelData("Sandalwood", "3g", "atlas origins", ""), None, 40, 20)
+    plain = render_product_label(cat.lookup(order.items[0])[0], None, 40, 20)
     assert with_setting.tobytes() == plain.tobytes()       # old "match_code = true" settings are ignored
 
 
