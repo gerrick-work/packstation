@@ -100,6 +100,16 @@ def test_tiktok_variant_linked_in_odoo_uses_the_odoo_product(tmp_path):
     assert [(i.sku, i.name, i.qty) for i in items] == [("SP034-15G", "[SP034-15G] Iso E Super 15g", 2)]
 
 
+def test_odoo_link_to_the_placeholder_is_ignored():
+    tt = FakeTT(lines=[{"sku_id": "1737", "product_name": "Galaxolide 50 – Premium Aroma Chemical | Fragrance Oil",
+                        "sku_name": "15g x2 (Best Value)", "seller_sku": ""}])
+    items = tt.items("x", {"1737": {"default_code": False, "display_name": "TikTok Shop Sale"}})
+    assert [(i.name, i.qty) for i in items] == [("Galaxolide 50 15g x2 (Best Value)", 1)]
+    from packstation.labels import Catalog
+    d, _ = Catalog().lookup(items[0])
+    assert (d.title, d.size, d.bottles) == ("Galaxolide 50", "15g", 2)     # 2 labels of 15g
+
+
 def test_placeholder_label_is_never_printed(tmp_path):
     rpc, fake = tiktok_fake()
     src = odoo_with(rpc, tmp_path, tt=None)

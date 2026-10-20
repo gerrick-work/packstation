@@ -108,13 +108,15 @@ class TikTokDirect:
     def items(self, order_ref: str, sku_products: dict[str, dict] | None = None) -> list[Item]:
         """The order's real bottles. A variant linked in Odoo (tiktok.item) gives its Odoo product;
         otherwise the listing name and variant ("Galaxolide 50 ... " + "15g x2")."""
-        from .odoo import _short_title
+        from .odoo import PLACEHOLDER_RE, _short_title
 
         counts: Counter = Counter()
         info: dict[str, Item] = {}
         for li in self.order(order_ref).get("line_items") or []:
             sku_id = str(li.get("sku_id") or "")
             prod = (sku_products or {}).get(sku_id)
+            if prod and PLACEHOLDER_RE.match(prod.get("display_name") or ""):
+                prod = None   # the connector links unmatched variants to "TikTok Shop Sale" itself
             if prod:
                 key, it = sku_id, Item(prod.get("default_code") or "", prod.get("display_name") or "", 1)
             else:
