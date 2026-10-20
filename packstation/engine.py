@@ -281,6 +281,10 @@ class Engine:
         vague = [i.name for i in o.items if PLACEHOLDER_RE.match(i.name)]
         if vague:
             out.append("Odoo has no product name for: " + ", ".join(vague))
+        sizeless = [self.catalog.lookup(i)[0].title for i in o.items
+                    if i.name not in vague and not self.catalog.lookup(i)[0].size]
+        if sizeless:
+            out.append("no size (check the order on the shop): " + ", ".join(sizeless))
         unknown = [i.sku or i.name for i in o.items if not self.catalog.lookup(i)[1] and i.name not in vague]
         if unknown:
             out.append("not in label list: " + ", ".join(unknown))

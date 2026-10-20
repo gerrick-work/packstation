@@ -649,9 +649,20 @@ def _line_item(text: str, placeholder: str) -> tuple[str, str]:
         ln = ln.strip()
         if not ln or ln.lower() in skip or PLACEHOLDER_RE.match(ln):
             continue
-        m = re.match(r"^\[([^\]]+)\]\s*(.*)$", ln)
-        return (m.group(1).strip(), m.group(2).strip()) if m else ("", ln)
+        m = re.match(r"^\[([^\]]*)\]\s*(.*)$", ln)   # "[SKU] name", or "[] name" when TikTok has no SKU
+        sku, name = (m.group(1).strip(), m.group(2).strip()) if m else ("", ln)
+        return sku, _short_title(name)
     return "", ""
+
+
+def _short_title(name: str) -> str:
+    """A shop listing title cut to the product: "Galaxolide 50 – Premium Aroma Chemical | Fragrance Oil"
+    -> "Galaxolide 50". The variant part after it ("Galaxolide 50 – ... , 15g") keeps its size."""
+    head = re.split(r"\s+[–—-]\s+|\s*\|\s*", name, maxsplit=1)[0].strip()
+    if not head or head == name:
+        return name
+    size = re.search(r"(?<![\d.])(\d+(?:\.\d+)?\s?(?:g|kg|ml|l|mg|oz)(?:\s*[x×*]\s*\d+)?)\b\s*$", name, re.I)
+    return f"{head} {size.group(1)}" if size and size.group(1) not in head else head
 
 
 def _primary_button(arch: str) -> str | None:

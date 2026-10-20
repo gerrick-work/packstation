@@ -235,3 +235,12 @@ def test_item_without_sku_matches_the_label_list_by_name(tmp_path):
     assert known and (data.icon, data.size, data.bottles) == ("corrosive", "15g", 2)
     assert cat.lookup(Item("", "Hedione 15g", 1))[1]
     assert not cat.lookup(Item("", "Hedione 30g", 1))[1]                      # different size: no match
+
+
+def test_tiktok_line_with_empty_sku_and_listing_title_is_cut_to_the_product():
+    from packstation.sources.odoo import _line_item
+    assert _line_item("[] Galaxolide 50 – Premium Aroma Chemical | Fragrance Oil | Perfume Base | Perfumery Grade",
+                      "TikTok Shop Sale") == ("", "Galaxolide 50")
+    assert _line_item("[] Iso E Super – Premium Aroma Chemical | Perfumery Grade 15g", "TikTok Shop Sale") \
+        == ("", "Iso E Super 15g")
+    assert _line_item("[ML-HED-BV] Hedione (15x2) Best Value", "TikTok Shop Sale") == ("ML-HED-BV", "Hedione (15x2) Best Value")
