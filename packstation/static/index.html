@@ -100,7 +100,7 @@ main{overflow:hidden;position:relative}
 .src.shopee{color:#D9431F}.src.tiktok{color:var(--ink)}.src.odoo{color:#714B67}
 .oid{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .items{font-size:15px;flex:1;color:var(--ink)}
-.items div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.items div{white-space:normal;overflow-wrap:anywhere}
 .q{color:var(--muted);display:inline-block;min-width:28px;font-variant-numeric:tabular-nums}
 .meta{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:var(--muted);gap:6px}
 .due.late{color:var(--red)}.due.today{color:var(--amber)}
@@ -128,7 +128,7 @@ main{overflow:hidden;position:relative}
 .lrow.sel .src{background:#fff}
 #viewSeg{flex:none}
 .lrow .code{font-size:17px}
-.lrow .its{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.lrow .its{white-space:normal;overflow-wrap:anywhere;min-width:0}
 .lrow .its .why{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .lrow .total,.lrow .r{text-align:right}
 .lrow .due{font-size:14px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -588,6 +588,7 @@ function renderRegister() {
         ${o.state === "arrange" ? `<button class="btn warn" id="printOne" ${busy ? "disabled" : ""}>Book courier &amp; print</button>`
           : `<button class="btn solid" id="printOne" ${busy || o.state === "waybill_missing" ? "disabled" : ""}>${o.printed_at ? "Print again" : "Print"}</button>`}
         <button class="btn" id="packOne">${o.state === "packed" ? "Undo packed" : "Mark packed"}</button>
+        ${o.printed_at ? `<button class="btn" id="unprintOne" ${busy ? "disabled" : ""}>Mark not printed</button>` : ""}
       </div>
       <h3>Reprint one part</h3>
       <div class="actions" style="margin-top:0">
@@ -601,10 +602,20 @@ function renderRegister() {
   $("#regBody").innerHTML = html;
   if (o) {
     $("#printOne").onclick = () => printOne(o);
+    const un = $("#unprintOne");
+    if (un) un.onclick = async () => {
+      if (!await confirmBox("Mark not printed?", `#${o.match || o.order_id} will show as new, and Print all will include it again.`, "Mark not printed")) return;
+      const r = await api(`/api/unprint/${encodeURIComponent(o.key)}`, {method: "POST"});
+      if (!r.ok) await confirmBox("Couldn't change it", r.message || "Try again.", "OK");
+      kick();
+    };
     $("#rpWaybill").onclick = () => reprint(o, "waybill");
     $("#rpLabels").onclick = () => reprint(o, "labels");
     $("#packOne").onclick = async () => {
-      await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed: o.state !== "packed"})});
+      const packing = o.state !== "packed";
+      if (!packing && !await confirmBox("Undo packed?", "This only changes Pack Station. The delivery stays validated in Odoo.", "Undo packed")) return;
+      const r = await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed: packing})});
+      if (!r.ok) await confirmBox("Not validated in Odoo", errText(r.error) || r.message || "Try again.", "OK");
       kick();
     };
   }
@@ -709,7 +720,8 @@ function renderPack() {
   c.querySelectorAll(".unit").forEach(b => b.onclick = () => { ticks[b.dataset.i].done = !ticks[b.dataset.i].done; renderPack(); });
   $("#packDone").onclick = async () => {
     if (!ticks.every(t => t.done) && o.state !== "packed") { beep(false); return; }
-    await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed: true})});
+    const r = await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed: true})});
+    if (!r.ok) { beep(false); await confirmBox("Not validated in Odoo", errText(r.error) || r.message || "Try again.", "OK"); kick(); return; }
     beep(true); packing = null; c.classList.remove("on"); $("#scanInput").focus(); kick();
   };
 }
@@ -849,6 +861,12 @@ function renderSettings() {
         <button data-v="1" class="${(st.picking_type_codes || []).includes("dropship") ? "on" : ""}">Include</button></span></div>
       <button class="btn" id="checkBtn" style="width:100%" ${st.odoo ? "" : "disabled"}>Check Odoo orders</button>
       <div id="checkOut" style="overflow-x:auto"></div></div>
+    <div class="pcard"><h2>Shopee Singapore shop</h2>
+      <p id="sgStatus">Checking…</p>
+      <a class="btn solid" href="/shopee-sg/connect" style="display:block;text-align:center;text-decoration:none">Connect Singapore shop</a>
+      <p class="hint" style="margin-top:10px">Log in on Shopee and tick only the Singapore shop. Shopee then opens a "page not found" on your Odoo site: that's expected. Copy that page's full address and paste it here:</p>
+      <div class="fieldrow"><input id="sgUrl" placeholder="https://…code=…" style="flex:1"></div>
+      <button class="btn ghost" id="sgPaste" style="width:100%">Finish connecting</button></div>
     <div class="pcard"><h2>Labels</h2>
       <div class="fieldrow"><label>Default brand</label><input id="brandIn" value="${esc(st.brand)}"></div>
       <button class="btn solid" id="brandSave">Save brand</button></div>
@@ -873,6 +891,18 @@ function renderSettings() {
   document.querySelectorAll("#shipSeg button").forEach(b => b.onclick = () => save({tiktok_ship_method: b.dataset.v}, "Courier booking"));
   document.querySelectorAll("#stateSeg button").forEach(b => b.onclick = () => save({include_waiting: b.dataset.v === "1"}, "Order setting"));
   document.querySelectorAll("#dropSeg button").forEach(b => b.onclick = () => save({include_dropship: b.dataset.v === "1"}, "Dropship setting"));
+  api("/api/shopee-sg").then(r => {
+    const el = $("#sgStatus"); if (!el) return;
+    el.innerHTML = r.connected
+      ? `<span class="ok">Connected</span> ${esc(r.shop_name || String(r.shop_id))}. Singapore orders show in the order list with the rest.` +
+        (r.error ? `<br><span class="no">${esc(errText(r.error))}</span>` : "")
+      : `<span class="no">Not connected</span>. Singapore orders aren't fetched yet.`;
+  });
+  $("#sgPaste").onclick = async () => {
+    const r = await api("/api/shopee-sg/paste", {method: "POST", body: JSON.stringify({url: $("#sgUrl").value})});
+    await notice(r.ok ? "Singapore connected" : "Not connected", r.ok ? "Singapore orders now show with the others." : errText(r.error));
+    await refreshState(); renderSettings();
+  };
   $("#checkBtn").onclick = async () => {
     $("#checkOut").innerHTML = `<p class="hint">Checking Odoo…</p>`;
     const r = await api("/api/odoo-check");
@@ -881,7 +911,7 @@ function renderSettings() {
     const typeName = t => ({outgoing: "Delivery", internal: "Internal", dropship: "Dropship", mrp_operation: "Manufacturing"}[t] || t);
     const del = r.deliveries.map(x => `<tr><td>${esc(x.company)}</td><td>${esc(x.operation)}</td><td>${esc(typeName(x.type))}</td><td>${esc(x.state_label)}</td>
       <td style="text-align:right">${x.count}</td><td>${x.listed ? yes : no}</td></tr>`).join("");
-    const sal = r.sales.map(x => `<tr><td>${esc(x.company)}</td><td>${esc(x.team)}</td><td style="text-align:right">${x.orders}</td>
+    const sal = r.sales.map(x => `<tr><td>${esc(x.company)}</td><td>${esc(x.team)}${x.team_skipped ? ' <span class="no">Skipped: not a Shopee/TikTok team</span>' : ""}</td><td style="text-align:right">${x.orders}</td>
       <td style="text-align:right">${x.listed}</td><td style="text-align:right">${x.no_delivery}</td></tr>`).join("");
     const wb = (r.waybills || []).map(x => `<tr><td>${esc(x.platform)}</td><td style="text-align:right">${x.total}</td>
       <td style="text-align:right">${x.found}</td><td>${esc(Object.entries(x.where).map(([k, n]) => n + " " + k).join(", ") || "-")}</td>

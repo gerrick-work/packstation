@@ -18,7 +18,7 @@ from datetime import datetime
 from . import config as config_mod
 from .errors import PackError, EventLog, classify
 from .labels import Catalog, labels_for_order
-from .models import Order
+from .models import Item, Order
 from .printers import build_printer
 from .sources import Source, build_sources
 from .sources.odoo import OdooSource
@@ -117,7 +117,8 @@ class Engine:
         try:
             self.sources = self._fixed_sources if self._fixed_sources is not None else build_sources(cfg)
             lab = cfg.get("labels", {})
-            self.catalog = Catalog(lab.get("catalog"), lab.get("brand") or None, data_dir=self.data_dir)
+            self.catalog = Catalog(lab.get("catalog"), lab.get("brand") or None, data_dir=self.data_dir,
+                                   default_icon=lab.get("icon", "corrosive"))
             printers = cfg.get("printers", {})
             for p in (self.waybill_printer, self.label_printer):
                 if p is not None and hasattr(p, "close"):
@@ -189,12 +190,32 @@ class Engine:
                 errors[s.name] = err.as_dict()
                 self.log.add("error", err.text, err.code)
         orders = self._merge(found)
+        self._fix_items(orders)
         self._unprint_waybill_less(orders)
         with self.lock:
             self.orders = orders
             self.source_errors = errors
             self.last_scan = datetime.now()
         return orders
+
+    def _fix_items(self, orders: list[Order]) -> None:
+        """data/item_fixes.json: {"WH/OUT/00084": [{"sku": "SP030-15G", "name": "Hedione 15g", "qty": 2}]}.
+        For orders a connector filed under a placeholder product (TikTok "TikTok Shop Sale" when the
+        listing had no seller SKU): the bottles to label instead."""
+        import json
+
+        path = os.path.join(self.data_dir, "item_fixes.json")
+        if not os.path.exists(path):
+            return
+        try:
+            fixes = json.loads(open(path, encoding="utf-8").read())
+        except ValueError as e:
+            self.log.add("error", f"item_fixes.json unreadable: {e}", "CONFIG")
+            return
+        for o in orders:
+            rows = fixes.get(o.order_id) or fixes.get(str(o.ref.get("platform_ref") or "-"))
+            if rows:
+                o.items = [Item(str(r.get("sku", "")), str(r.get("name", "")), int(r.get("qty", 1))) for r in rows]
 
     def _unprint_waybill_less(self, orders: list[Order]) -> None:
         """Marketplace orders recorded as printed without a waybill/tracking were never really done."""
@@ -209,6 +230,21 @@ class Engine:
     def _merge(orders: list[Order]) -> list[Order]:
         """Odoo deliveries for Shopee/TikTok orders read directly from the platforms are the same
         parcel: keep the platform order (it has the waybill) and remember the Odoo delivery."""
+        # An order typed in by hand (Settings > manual orders) that the platform now sends too: keep
+        # the hand-made one, so what was already printed or packed stays that way.
+        manual = {o.order_id for o in orders if o.source == "manual"}
+        orders = [o for o in orders if o.source == "manual" or o.order_id not in manual]
+        # A hand-made parcel that covers several Odoo deliveries (TikTok combined shipment): fold them in
+        covered = {}
+        for m in orders:
+            for name in (m.ref.get("covers") or []) if m.source == "manual" else []:
+                covered[name] = m
+        for o in orders:
+            m = covered.get(o.order_id) if o.source == "odoo" else None
+            if m is not None:
+                m.ref.setdefault("odoo_picking_ids", []).append(o.odoo_picking_id)
+                m.odoo_picking_id = m.odoo_picking_id or o.odoo_picking_id
+        orders = [o for o in orders if not (o.source == "odoo" and o.order_id in covered)]
         platform = {o.order_id: o for o in orders if o.source != "odoo"}
         merged = [o for o in orders if o.source != "odoo"]
         for o in orders:
@@ -614,6 +650,22 @@ class Engine:
             job.summary = f"Calibration page sent to the {name} printer ({note})"
 
         return self.submit("calibrate", f"Calibrate {name} printer", work)
+
+    def start_print_labels(self, items: list[Item], title: str = "Bottle labels") -> Job:
+        """Bottle labels only, all in one run (no waybills), then one separator."""
+        from .labels import labels_for_order
+
+        def work(job: Job):
+            labels = labels_for_order(Order("labels", "batch", items), self.catalog, self.label_cfg)
+            for n, (img, item, _) in enumerate(labels, 1):
+                job.current = f"label {n} of {len(labels)}"
+                self.label_printer.print_image(img, f"batch-{n:02d}", detail=f"{title}: label {n} of {len(labels)}")
+            if labels:
+                self.label_printer.feed_separator(self.label_cfg.get("separator", "blank"), detail=f"{title}, done")
+            job.summary = f"{len(labels)} bottle labels printed"
+            self.log.add("info", f"{title}: printed {len(labels)} bottle labels")
+
+        return self.submit("labels", title, work)
 
     def start_test(self, name: str, data=None) -> Job:
         from .labels import LabelData, render_product_label

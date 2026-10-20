@@ -24,35 +24,46 @@ from PIL import Image, ImageDraw
 from .errors import PackError
 
 
-def pdf_to_image(pdf: bytes, dpi: int) -> Image.Image:
+def pdf_to_image(pdf: bytes, dpi: int, box_mm: tuple[float, float] | None = None, supersample: int = 3) -> Image.Image:
+    """Render page 1 for a thermal printer. Drawn at 3x the printer's resolution and shrunk down, so
+    letter edges are averaged properly before the 1-bit step (smoother, fuller strokes, less grain).
+    With box_mm the page is scaled to fit inside that box."""
     import pypdfium2 as pdfium
 
     doc = pdfium.PdfDocument(pdf)
     page = doc[0]
-    return page.render(scale=dpi / 72).to_pil().convert("L")
+    scale = dpi / 72
+    if box_mm:
+        pw, ph = page.get_size()  # points
+        bw, bh = (v / 25.4 * dpi for v in box_mm)
+        scale = min(bw / pw, bh / ph)
+    target = page.render(scale=scale).to_pil().size
+    big = page.render(scale=scale * supersample).to_pil().convert("L")
+    return big.resize(target, Image.LANCZOS)
 
 
-def to_1bit(img: Image.Image) -> Image.Image:
-    return img.convert("L").point(lambda v: 0 if v < 160 else 255).convert("1")
+def to_1bit(img: Image.Image, cut: int = 160) -> Image.Image:
+    """Grey to black/white. A higher cut makes strokes fuller (more grey counts as black)."""
+    return img.convert("L").point(lambda v: 0 if v < cut else 255).convert("1")
 
 
-def fit_to_label(img: Image.Image, w: int, h: int) -> Image.Image:
+def fit_to_label(img: Image.Image, w: int, h: int, cut: int = 160) -> Image.Image:
     """Scale to fit the label, keep aspect ratio, centre, threshold to 1-bit (keeps barcodes crisp)."""
     img = img.convert("L")
     scale = min(w / img.width, h / img.height)
     resized = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.LANCZOS)
     canvas = Image.new("L", (w, h), 255)
     canvas.paste(resized, ((w - resized.width) // 2, (h - resized.height) // 2))
-    return to_1bit(canvas)
+    return to_1bit(canvas, cut)
 
 
-def place_native(img: Image.Image, w: int, h: int) -> Image.Image:
-    """Put an image already rendered at the printer's dpi onto the label at its real size: no
-    rescaling. Centred across, top-aligned; anything wider than the label is trimmed equally both sides."""
+def place_native(img: Image.Image, w: int, h: int, cut: int = 185) -> Image.Image:
+    """Put an image already rendered at the printer's dpi onto the label with no rescaling, centred
+    both ways; anything larger than the label is trimmed equally on each side."""
     img = img.convert("L")
     canvas = Image.new("L", (w, h), 255)
-    canvas.paste(img, ((w - img.width) // 2, 0))
-    return to_1bit(canvas)
+    canvas.paste(img, ((w - img.width) // 2, max(0, (h - img.height) // 2)))
+    return to_1bit(canvas, cut)
 
 
 def shift(img: Image.Image, dx: int, dy: int) -> Image.Image:
@@ -167,12 +178,16 @@ class Printer:
 
     def prepare(self, img: Image.Image, native: bool = False) -> Image.Image:
         w, h = self.dots
-        page = place_native(img, w, h) if native else fit_to_label(img, w, h)
+        if native:
+            page = place_native(img, w, h, int(self.cfg.get("darkness", 185)))
+        else:
+            page = fit_to_label(img, w, h, int(self.cfg.get("darkness", 160)))
         return shift(page, self._mm(self.offset_x_mm), self._mm(self.offset_y_mm))
 
     def print_pdf(self, pdf: bytes, label: str, detail: str = "") -> str:
         """Waybills: rendered at the printer's dpi and printed at their real size (no rescale)."""
-        return self.print_image(pdf_to_image(pdf, self.dpi), label, detail=detail, native=True)
+        box = (float(self.cfg.get("content_width_mm", 94)), float(self.cfg.get("content_height_mm", 136)))
+        return self.print_image(pdf_to_image(pdf, self.dpi, box), label, detail=detail, native=True)
 
     def print_image(self, img: Image.Image, label: str, detail: str = "", native: bool = False) -> str:
         page = self.prepare(img, native)
@@ -305,7 +320,8 @@ class BluetoothPrinter(Printer):
         return f"bluetooth {self.cfg.get('ble_name') or self.cfg['ble_address']}"
 
     def _feed_blank(self):
-        self._send(tspl_feed(self.width_mm, self.height_mm, self.gap_mm))
+        # An empty printed page, not FORMFEED: the E40 Pro ignores FORMFEED over Bluetooth.
+        self._send(self._job(Image.new("1", self.dots, 1)))
 
     def close(self):
         self.link.close()

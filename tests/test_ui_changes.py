@@ -8,7 +8,10 @@ from packstation.models import Item, Order
 from packstation.sources.demo import DemoSource
 from packstation.sources.odoo import OdooSource
 
-from test_fixes import FakeOdoo, by_name, write_cfg
+try:
+    from tests.test_fixes import FakeOdoo, by_name, write_cfg
+except ImportError:
+    from test_fixes import FakeOdoo, by_name, write_cfg
 
 
 def demo_engine(tmp_path):
@@ -35,8 +38,8 @@ def test_odoo_orders_carry_the_sale_order_total(tmp_path):
     def with_totals(model, method, *a, **kw):
         if model == "sale.order" and method == "read":
             assert {"amount_total", "currency_id"} <= set(kw["fields"])
-            return [{"id": i, "client_order_ref": f"PLAT{i}", "amount_total": 88.5, "currency_id": [1, "MYR"]}
-                    for i in a[0]]
+            return [dict(s, amount_total=88.5, currency_id=[1, "MYR"], team_id=s.get("team_id") or [1, "Shopee"])
+                    for s in real(model, method, *a, **kw)]
         return real(model, method, *a, **kw)
 
     eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=with_totals, sleep=lambda s: None)])

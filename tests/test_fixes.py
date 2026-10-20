@@ -125,6 +125,8 @@ class FakeOdoo:
             return [{"id": i, "default_code": f"ML-{i}", "display_name": f"Linalool {i} 3g"} for i in args[0]]
         if model == "sale.order" and method == "read":
             return [{"id": i, "client_order_ref": f"PLAT{i}"} for i in args[0]]
+        if model == "ir.attachment" and method == "fields_get":
+            return {"datas": {"type": "binary"}, "name": {"type": "char"}}
         if model == "ir.attachment" and method == "search_read":
             pick = sale = []
             dom = args[0]
@@ -173,7 +175,7 @@ class FakeOdoo:
 @pytest.fixture
 def odoo_engine(tmp_path):
     fake = FakeOdoo()
-    src = OdooSource({}, rpc=fake, sleep=lambda s: None)
+    src = OdooSource({"only_sales_teams": []}, rpc=fake, sleep=lambda s: None)
     eng = Engine(write_cfg(tmp_path), sources=[src])
     eng.scan()
     return eng, fake
@@ -210,11 +212,20 @@ def test_waybill_prints_at_native_size_not_rescaled(tmp_path):
 def test_bottle_label_template_is_fixed_whatever_the_title():
     a = render_product_label(LabelData("Sandalwood", "3g", "atlas origins", ""), "278A", 40, 20)
     b = render_product_label(LabelData("Isoamyl Acetate Natural", "3g", "atlas origins", ""), "278A", 40, 20)
-    lower = (0, 70, 320, 160)   # size line, brand line, match code: identical positions
-    assert a.crop(lower).tobytes() == b.crop(lower).tobytes()
-    w = []
-    render_product_label(LabelData("A Very Long Material Name Indeed", "3g", "atlas origins", ""), None, 40, 20, warnings=w)
-    assert w and "too long" in w[0]
+    c = render_product_label(LabelData("A Very Long Material Name Indeed", "3g", "atlas origins", ""), "278A", 40, 20)
+    lower = (0, 78, 320, 160)   # size line, brand line, match code: identical positions
+    assert a.crop(lower).tobytes() == b.crop(lower).tobytes() == c.crop(lower).tobytes()
+
+
+def test_long_label_title_wraps_in_full_never_ellipsized():
+    from PIL import Image, ImageDraw
+    from packstation.labels import fit_title
+    d = ImageDraw.Draw(Image.new("L", (10, 10)))
+    for name in ["A Very Long Material Name Indeed", "Organic Tea Tree Essential Oil", "Hydroxycitronellalextraordinaire"]:
+        lines, font = fit_title(d, name, None, 34, 288, 66)
+        assert "".join(lines).replace(" ", "") == name.replace(" ", "")
+        assert not any("\u2026" in x or "..." in x for x in lines)
+        assert all(d.textlength(x, font=font) <= 288 for x in lines)
 
 
 def test_default_brand_is_atlas_origins(tmp_path):
@@ -305,7 +316,7 @@ def test_bad_printed_record_for_00073_is_removed(tmp_path):
     st = Store(tmp_path / "data")
     st.mark("odoo:WH/OUT/00073", None, 2)
     st.mark("odoo:WH/OUT/00011", None, 1)
-    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=FakeOdoo())])
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({"only_sales_teams": []}, rpc=FakeOdoo())])
     assert "odoo:WH/OUT/00073" not in eng.store.printed()
     assert "odoo:WH/OUT/00011" in eng.store.printed()            # unrelated record left alone
 
@@ -417,7 +428,7 @@ def test_errors_are_logged_with_codes(odoo_engine, tmp_path):
 def test_odoo_unreachable_is_odoo_net(tmp_path):
     def down(*a, **k):
         raise PackError("ODOO-NET", "reading Odoo", "connection refused")
-    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=down)])
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({"only_sales_teams": []}, rpc=down)])
     eng.scan()
     assert eng.source_errors["odoo"]["code"] == "ODOO-NET"
 
@@ -507,9 +518,63 @@ def test_tracking_falls_back_to_connector_field():
     p["shopee_tracking_number"] = "SPXMY0999111Z"
     for q in fake.pickings.values():
         q.setdefault("shopee_tracking_number", False)
-    src = OdooSource({}, rpc=fake)
+    src = OdooSource({"only_sales_teams": []}, rpc=fake)
     o = {x.order_id: x for x in src.list_orders()}["WH/OUT/00080"]
     assert o.tracking == "SPXMY0999111Z" and o.match_code == "111Z"
+
+
+class LiveShapedOdoo(FakeOdoo):
+    """Matches atlas-dsf.odoo.com (saas~19.4): kit products put raw grams on the delivery, the Shopee
+    label is a plain attachment named Shopee_Label_<delivery>.pdf, attachments use "raw", and every
+    delivery carries shopee_label_status "not available" by default."""
+
+    def __init__(self):
+        super().__init__()
+        for p in self.pickings.values():
+            p.pop("shopee_label_attachment_id", None)
+            if not p["shopee_label_status"]:
+                p["shopee_label_status"] = "not available"
+        self.pickings[90]["sale_id"] = [12, "S00090"]   # bulk B2B order in the Sales team
+
+    def __call__(self, model, method, *args, **kw):
+        if model == "sale.order" and method == "read":
+            team = {9: "TikTok Shop", 10: "Shopee", 11: "Shopee", 12: "Sales"}
+            return [{"id": i, "client_order_ref": False, "team_id": [1, team[i]], "order_line": [i * 10]}
+                    for i in args[0]]
+        if model == "sale.order.line" and method == "read":
+            return [{"id": l, "order_id": [l // 10, "S"], "product_id": [900 + l, "x"], "product_uom_qty": 1.0,
+                     "display_type": False, "is_delivery": False} for l in args[0]]
+        if model == "product.product" and method == "read" and args[0] and args[0][0] >= 900:
+            return [{"id": i, "default_code": f"SP-{i}-3G", "display_name": f"Bottle {i} 3g", "type": "consu"}
+                    for i in args[0]]
+        if model == "stock.move" and method == "read":
+            return [{"id": i, "product_id": [100 + i, "x"], "product_uom_qty": 0.3} for i in args[0]]
+        if model == "ir.attachment" and method == "fields_get":
+            return {"raw": {"type": "binary"}}
+        if model == "ir.attachment" and method == "search_read":
+            return [{"id": 501, "res_id": 80, "res_model": "stock.picking", "name": "Shopee_Label_WH-OUT-00080.pdf",
+                     "mimetype": "application/pdf", "create_date": "2026-10-12"}]
+        if model == "ir.attachment" and method == "read":
+            return [{"id": i, "raw": self.att[i]} for i in args[0]]
+        return super().__call__(model, method, *args, **kw)
+
+
+def test_live_odoo_shape_bottles_teams_and_shopee_label():
+    src = OdooSource({}, rpc=LiveShapedOdoo())
+    orders = {o.order_id: o for o in src.list_orders()}
+    assert "WH/OUT/00090" not in orders                       # Sales-team bulk order skipped
+    assert orders["WH/OUT/00073"].platform == "tiktok"
+    shp = orders["WH/OUT/00080"]
+    assert shp.platform == "shopee" and shp.waybill_ready
+    assert [(i.name, i.qty) for i in shp.items] == [("Bottle 1000 3g", 1)]   # bottle, not 0.3 g
+    assert src.get_waybill(shp).startswith(b"%PDF")
+
+
+def test_odoo_sku_prefix_left_off_label_title():
+    from packstation.labels import Catalog
+    from packstation.models import Item
+    data, known = Catalog(None, "atlas origins").lookup(Item("SP037-3G", "[SP037-3G] Labdanum 3g"))
+    assert (data.title, data.size, known) == ("Labdanum", "3g", False)
 
 
 def test_bottle_labels_have_no_match_code(tmp_path):
@@ -517,7 +582,7 @@ def test_bottle_labels_have_no_match_code(tmp_path):
     order = Order("demo", "D1", [Item("X", "Sandalwood 3g", 1)], tracking="SPXMY0601278A")
     cat = Catalog(data_dir=tmp_path)
     with_setting = labels_for_order(order, cat, {"width_mm": 40, "height_mm": 20, "match_code": True})[0][0]
-    plain = render_product_label(LabelData("Sandalwood", "3g", "atlas origins", ""), None, 40, 20)
+    plain = render_product_label(LabelData("Sandalwood", "3g", "atlas origins", "corrosive"), None, 40, 20)
     assert with_setting.tobytes() == plain.tobytes()       # old "match_code = true" settings are ignored
 
 
@@ -536,7 +601,7 @@ def add_singapore(fake):
 def test_singapore_company_orders_are_scanned():
     fake = FakeOdoo()
     add_singapore(fake)
-    names = {o.order_id for o in OdooSource({}, rpc=fake).list_orders()}
+    names = {o.order_id for o in OdooSource({"only_sales_teams": []}, rpc=fake).list_orders()}
     assert "SG/OUT/00012" in names                      # second company now read
     assert "SG/OUT/00013" not in names                  # Waiting: only with the setting below
     sr = [c for c in fake.calls if c[1] == "search_read"][-1]
@@ -546,7 +611,7 @@ def test_singapore_company_orders_are_scanned():
 def test_ready_plus_waiting_setting_includes_waiting_deliveries():
     fake = FakeOdoo()
     add_singapore(fake)
-    names = {o.order_id for o in OdooSource({"picking_states": ["assigned", "confirmed", "waiting"]},
+    names = {o.order_id for o in OdooSource({"only_sales_teams": [], "picking_states": ["assigned", "confirmed", "waiting"]},
                                            rpc=fake).list_orders()}
     assert {"SG/OUT/00012", "SG/OUT/00013"} <= names
 
@@ -555,14 +620,15 @@ def test_odoo_check_explains_where_orders_are(tmp_path):
     from packstation.web import create_app
     fake = FakeOdoo()
     add_singapore(fake)
-    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=fake)])
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({"only_sales_teams": []}, rpc=fake)])
     c = create_app(eng).test_client()
     r = c.get("/api/odoo-check").get_json()
     sg_wait = [x for x in r["deliveries"] if x["company"] == "Atlas DSF (SG)" and x["state"] == "confirmed"]
     assert sg_wait and sg_wait[0]["count"] == 1 and not sg_wait[0]["listed"] and sg_wait[0]["type"] == "outgoing"
     assert r["companies"] == ["Atlas DSF (MY)", "Atlas DSF (SG)"]
     sg = next(x for x in r["sales"] if x["team"] == "Shopee SG")
-    assert sg == {"company": "Atlas DSF (SG)", "team": "Shopee SG", "orders": 2, "listed": 0, "no_delivery": 1}
+    assert sg == {"company": "Atlas DSF (SG)", "team": "Shopee SG", "orders": 2, "listed": 0, "no_delivery": 1,
+                  "team_skipped": False}
     assert c.get("/api/state").get_json()["version"]
 
 
@@ -570,8 +636,8 @@ def test_dropship_type_can_be_included():
     fake = FakeOdoo()
     add_singapore(fake)
     fake.pickings[200]["picking_type_code"] = "dropship"
-    assert "SG/OUT/00012" not in {o.order_id for o in OdooSource({}, rpc=fake).list_orders()}
-    src = OdooSource({"picking_type_codes": ["outgoing", "dropship"]}, rpc=fake)
+    assert "SG/OUT/00012" not in {o.order_id for o in OdooSource({"only_sales_teams": []}, rpc=fake).list_orders()}
+    src = OdooSource({"only_sales_teams": [], "picking_type_codes": ["outgoing", "dropship"]}, rpc=fake)
     assert "SG/OUT/00012" in {o.order_id for o in src.list_orders()}
 
 
@@ -593,6 +659,17 @@ def test_dropship_switch_saves_from_settings(tmp_path):
     assert saved == ["outgoing", "dropship"]
 
 
+def test_odoo_check_flags_shop_skipped_by_sales_team(tmp_path):
+    from packstation.web import create_app
+    fake = FakeOdoo()
+    add_singapore(fake)
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=fake)])   # default: Shopee / TikTok Shop teams only
+    r = create_app(eng).test_client().get("/api/odoo-check").get_json()
+    sg = next(x for x in r["sales"] if x["team"] == "Shopee SG")
+    assert sg["team_skipped"] and sg["listed"] == 0
+    assert r["teams"] == ["shopee", "tiktok shop"]
+
+
 # ---------------------------------------------------------------- TikTok waybills saved elsewhere
 
 def tiktok_ready(fake, pid=73):
@@ -607,7 +684,7 @@ def test_tiktok_waybill_saved_as_plain_attachment_is_found(tmp_path):
                    "mimetype": "application/pdf", "create_date": "2026-10-14"},
                   {"id": 900, "name": "TikTok Shipping Label.pdf", "res_model": "stock.picking", "res_id": 73,
                    "mimetype": "application/pdf", "create_date": "2026-10-14"}]
-    src = OdooSource({}, rpc=fake, sleep=lambda s: None)
+    src = OdooSource({"only_sales_teams": []}, rpc=fake, sleep=lambda s: None)
     eng = Engine(write_cfg(tmp_path), sources=[src])
     eng.scan()
     o = by_name(eng)["WH/OUT/00073"]
@@ -638,7 +715,7 @@ def test_tiktok_waybill_in_a_differently_named_file_field(tmp_path):
             return super().__call__(model, method, *args, **kw)
     f2 = Fake()
     f2.pickings = fake.pickings
-    src = OdooSource({}, rpc=f2, sleep=lambda s: None)
+    src = OdooSource({"only_sales_teams": []}, rpc=f2, sleep=lambda s: None)
     orders = {o.order_id: o for o in src.list_orders()}
     o = orders["WH/OUT/00073"]
     assert src.f_tt_label == "tiktok_shipping_label"
@@ -650,7 +727,7 @@ def test_tiktok_waybill_in_a_differently_named_file_field(tmp_path):
 
 def test_odoo_check_reports_waybills_per_platform():
     fake = FakeOdoo()
-    src = OdooSource({}, rpc=fake, sleep=lambda s: None)
+    src = OdooSource({"only_sales_teams": []}, rpc=fake, sleep=lambda s: None)
     w = {g["platform"]: g for g in src.check()["waybills"]}
     assert w["shopee"]["total"] == 2 and w["shopee"]["found"] == 1
     assert w["tiktok"]["total"] == 1 and w["tiktok"]["found"] == 0

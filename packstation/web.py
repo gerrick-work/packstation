@@ -50,14 +50,8 @@ def lan_addresses(port: int) -> list[str]:
 
 
 def app_icon(size: int) -> Image.Image:
-    im = Image.new("RGB", (size, size), (44, 70, 58))
-    d = ImageDraw.Draw(im)
-    s = size / 24
-    pts = [(6, 9), (12, 6), (18, 9), (12, 12)]
-    d.polygon([(x * s, y * s) for x, y in pts], outline="white", width=max(2, int(size / 40)))
-    for a, b in [((6, 9), (6, 16)), ((6, 16), (12, 19)), ((12, 19), (18, 16)), ((18, 16), (18, 9)), ((12, 12), (12, 19))]:
-        d.line([(a[0] * s, a[1] * s), (b[0] * s, b[1] * s)], fill="white", width=max(2, int(size / 40)))
-    return im
+    from .icon import bean_icon
+    return bean_icon(size)
 
 
 def create_app(engine: Engine) -> Flask:
@@ -222,6 +216,15 @@ def create_app(engine: Engine) -> Flask:
             return jsonify(ok=False, **r), 409
         return jsonify(ok=True, job=r.as_dict())
 
+    @app.post("/api/unprint/<path:key>")
+    def unprint(key):
+        """Make an order look new again (testing, or printed by mistake). Platforms and Odoo are untouched."""
+        if key in engine.busy_keys:
+            return jsonify(ok=False, message="This order is printing right now"), 409
+        engine.store.unmark(key)
+        engine.store.mark_packed(key, False)
+        return jsonify(ok=True, message="Marked as not printed")
+
     @app.post("/api/reprint/<path:key>")
     def reprint(key):
         part = (request.get_json(silent=True) or {}).get("part", "")
@@ -232,8 +235,22 @@ def create_app(engine: Engine) -> Flask:
 
     @app.post("/api/packed/<path:key>")
     def packed(key):
-        engine.store.mark_packed(key, bool((request.get_json(silent=True) or {}).get("packed", True)))
-        return jsonify(ok=True)
+        want = bool((request.get_json(silent=True) or {}).get("packed", True))
+        validated = False
+        if want and engine.cfg.get("odoo", {}).get("validate_when_packed", True):
+            order = next((o for o in engine.orders if o.key == key), None)
+            odoo = next((s for s in engine.sources if getattr(s, "name", "") == "odoo"), None)
+            if order is not None and odoo is not None and order.odoo_picking_id and hasattr(odoo, "validate"):
+                try:
+                    for pid in order.ref.get("odoo_picking_ids") or [order.odoo_picking_id]:
+                        odoo.validate(pid)
+                    validated = True
+                    engine.log.add("info", f"Packed and validated in Odoo: {order.order_id}", None, key)
+                except Exception as e:
+                    return err(e)
+        engine.store.mark_packed(key, want)
+        return jsonify(ok=True, validated=validated,
+                       message="Packed and validated in Odoo" if validated else ("Packed" if want else "Not packed"))
 
     @app.get("/api/find")
     def find():
@@ -311,6 +328,21 @@ def create_app(engine: Engine) -> Flask:
         except Exception as e:
             return err(e)
 
+    @app.post("/api/print-labels")
+    def print_labels():
+        """Body {items: [{sku, name, qty}], title}: those bottle labels only, in one run."""
+        from .models import Item
+
+        body = request.get_json(silent=True) or {}
+        items = [Item(str(i.get("sku", "")), str(i.get("name", "")), int(i.get("qty", 1)))
+                 for i in body.get("items") or [] if i.get("name") or i.get("sku")]
+        if not items:
+            return err(PackError("CONFIG", "printing labels", "no items given"))
+        try:
+            return jsonify(ok=True, job=engine.start_print_labels(items, str(body.get("title") or "Bottle labels")).as_dict())
+        except Exception as e:
+            return err(e)
+
     @app.post("/api/calibrate/<name>")
     def calibrate(name):
         if name not in ("waybill", "label"):
@@ -381,6 +413,78 @@ def create_app(engine: Engine) -> Flask:
             from .errors import classify
             return err(classify(e, "checking Odoo"))
 
+    # ---- Shopee Singapore (Direct shop): its own authorisation ------------------------------------
+
+    def sg_source():
+        from .sources.shopee_sip import ShopeeSipSource
+
+        s = next((x for x in engine.sources if isinstance(x, ShopeeSipSource)), None)
+        if s is None:
+            if not engine.odoo:
+                raise PackError("CONFIG", "connecting Singapore", "Odoo isn't switched on in config.toml")
+            s = ShopeeSipSource(engine.odoo, ["SG"], data_dir=engine.data_dir)
+        return s
+
+    def sg_finish(code, shop_id=None, main_account_id=None):
+        shops = sg_source().connect(code, shop_id=shop_id, main_account_id=main_account_id)
+        regions = sorted({*(engine.cfg.get("odoo", {}).get("shopee_sip_regions") or []), *(x["region"] for x in shops)})
+        engine.save_settings("odoo", {"shopee_sip_regions": regions})
+        names = ", ".join(f"{x['shop_name'] or x['shop_id']} ({x['region']})" for x in shops)
+        engine.log.add("info", f"Shopee shop connected: {names}")
+        threading.Thread(target=engine.scan, daemon=True).start()
+        return shops
+
+    @app.get("/api/shopee-sg")
+    def sg_status():
+        try:
+            tokens = sg_source().own_tokens()
+        except Exception:
+            tokens = {}
+        t = tokens.get("SG") or {}
+        return jsonify(ok=True, connected=bool(t), shop_name=t.get("shop_name", ""), shop_id=t.get("shop_id"),
+                       connected_at=t.get("connected_at"), on=("SG" in (engine.cfg.get("odoo", {}).get("shopee_sip_regions") or [])),
+                       error=engine.source_errors.get("shopee-sg"))
+
+    @app.get("/shopee-sg/connect")
+    def sg_connect():
+        from flask import redirect
+
+        try:
+            # Shopee only sends you back to the app's registered domain (the Odoo site). Its page there
+            # won't know the address, so Settings asks you to paste it ("Finish connecting").
+            odoo_url = (engine.cfg.get("odoo", {}).get("url") or "").rstrip("/")
+            back = engine.cfg.get("odoo", {}).get("shopee_redirect") or (
+                odoo_url + "/packstation-singapore" if odoo_url else request.host_url.rstrip("/") + "/shopee-sg/callback")
+            return redirect(sg_source().auth_url(back))
+        except Exception as e:
+            return f"<p style='font:18px sans-serif;padding:30px'>Couldn't start: {e}</p><p><a href='/'>Back</a></p>", 500
+
+    @app.get("/shopee-sg/callback")
+    def sg_callback():
+        a = request.args
+        page = "<div style='font:18px -apple-system,sans-serif;padding:40px;max-width:560px'>{}<p><a href='/'>Back to Pack Station</a></p></div>"
+        if not a.get("code"):
+            return page.format("<h2>Not connected</h2><p>Shopee didn't send a code back.</p>"), 400
+        try:
+            shops = sg_finish(a["code"], a.get("shop_id"), a.get("main_account_id"))
+        except Exception as e:
+            return page.format(f"<h2>Not connected</h2><p>{e}</p>"), 400
+        names = ", ".join(f"{x['shop_name'] or x['shop_id']} ({x['region']})" for x in shops)
+        return page.format(f"<h2>Connected ✓</h2><p>{names}. Its orders now show in Pack Station with the others.</p>")
+
+    @app.post("/api/shopee-sg/paste")
+    def sg_paste():
+        """Fallback when Shopee sends you to another site: paste the address you landed on."""
+        from urllib.parse import parse_qs, urlparse
+
+        q = {k: v[0] for k, v in parse_qs(urlparse(str((request.get_json(silent=True) or {}).get("url", ""))).query).items()}
+        if not q.get("code"):
+            return err(PackError("SHOPEE-SG", "connecting Singapore", "that address has no code= in it"))
+        try:
+            return jsonify(ok=True, shops=sg_finish(q["code"], q.get("shop_id"), q.get("main_account_id")))
+        except Exception as e:
+            return err(e if isinstance(e, PackError) else PackError("SHOPEE-SG", "connecting Singapore", str(e)[:200]))
+
     @app.get("/api/log")
     def log():
         return jsonify(items=engine.log.recent(300))
@@ -421,6 +525,12 @@ def create_app(engine: Engine) -> Flask:
 
         def again():
             time.sleep(0.8)
+            srv = app.config.get("SERVER")
+            if srv is not None:
+                try:
+                    srv.socket.close()  # free the port for the new copy
+                except OSError:
+                    pass
             os.environ["PACKSTATION_RESTARTED"] = "1"
             args = [a for a in sys.argv[1:] if a != "--no-browser"] + ["--no-browser"]
             os.execv(sys.executable, [sys.executable, "-m", "packstation", *args])

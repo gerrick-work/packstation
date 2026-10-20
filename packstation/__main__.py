@@ -55,7 +55,28 @@ def main() -> None:
         if not args.no_browser and not os.environ.get("PACKSTATION_RESTARTED"):
             webbrowser.open(url)
         print(f"Pack Station running at {url}  (Ctrl+C to stop)")
-        create_app(engine).run(host=host, port=port, threaded=True)
+        import time
+        from werkzeug.serving import make_server
+
+        app = create_app(engine)
+        # A copy started by Flask's run() passes its listening socket on through restarts
+        # (WERKZEUG_SERVER_FD). Close that leftover so this copy can bind the port itself.
+        fd = os.environ.pop("WERKZEUG_SERVER_FD", None)
+        if fd and fd.isdigit():
+            try:
+                os.close(int(fd))
+            except OSError:
+                pass
+        for attempt in range(20):  # after a restart the old copy may need a moment to let go of the port
+            try:
+                srv = make_server(host, port, app, threaded=True)
+                break
+            except OSError:
+                if attempt == 19:
+                    raise
+                time.sleep(1)
+        app.config["SERVER"] = srv
+        srv.serve_forever()
 
 
 if __name__ == "__main__":
