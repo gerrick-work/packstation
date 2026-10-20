@@ -2,7 +2,10 @@
 import base64
 import io
 import time
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.9 on the Mac
+    import tomli as tomllib
 import xmlrpc.client
 
 import pytest
