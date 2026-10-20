@@ -279,7 +279,7 @@ class Engine:
         ready = self.pending()
         return {
             "ready": [o.key for o in ready],
-            "labels": sum(o.unit_count for o in ready),
+            "labels": sum(self.catalog.label_count(o) for o in ready),
             "arrange": [o.key for o in unprinted if o.needs_arrange and not self.held(o)],
             "missing": [o.key for o in unprinted if o.waybill_missing],
             "held": [o.key for o in unprinted if self.held(o)],

@@ -156,6 +156,7 @@ h3{font-size:13px;color:var(--muted);margin:20px 0 8px;letter-spacing:.01em}
 .ids{font-size:13px;color:var(--muted);margin:8px 0 10px;word-break:break-all;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .detail ul{list-style:none;margin:0;padding:0}
 .detail li{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);font-size:15px}
+.pack{display:block;font-size:13px;color:var(--muted)}
 .flag{font-size:12px;color:var(--amber);background:var(--ambert);border-radius:6px;padding:1px 7px;margin-left:6px;white-space:nowrap}
 .preview{width:100%;border-radius:12px;background:var(--bg2);margin-top:12px}
 .actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}
@@ -346,7 +347,7 @@ td img{height:52px;border-radius:6px;border:1px solid var(--line);display:block}
       <div class="scroll" style="padding-top:8px">
         <table>
           <thead><tr><th style="width:17%">SKU</th><th>Title</th><th style="width:8%">Size</th><th style="width:13%">Brand</th>
-            <th style="width:12%">Icon</th><th style="width:120px">Preview</th><th style="width:150px"></th></tr></thead>
+            <th style="width:12%">Icon</th><th style="width:7%" title="Labels per item sold. Empty: read from the name, e.g. (15x2) = 2">Bottles</th><th style="width:120px">Preview</th><th style="width:150px"></th></tr></thead>
           <tbody id="labelRows"></tbody>
         </table>
       </div>
@@ -580,7 +581,7 @@ function renderRegister() {
       <div class="ids">${srcHtml(o)} <span>${esc(o.order_id)}${o.tracking ? " · " + esc(o.tracking) : " · no tracking number yet"}${o.printed_at ? " · printed " + hhmm(o.printed_at) : ""}</span></div>
       ${o.state === "held" ? `<div class="errbox">${esc(whyText(o))}. Print all skips it while "Hold orders with missing info" is on.</div>`
         : o.error ? `<div class="errbox">${esc(errText(o.error))}</div>` : ""}
-      <ul>${o.items.map(i => `<li><span>${esc(i.name)}${i.known ? "" : '<span class="flag">not in label list</span>'}</span><span class="q">×${i.qty}</span></li>`).join("")}</ul>
+      <ul>${o.items.map(i => `<li><span>${esc(i.name)}${i.known ? "" : '<span class="flag">not in label list</span>'}${i.bottles > 1 ? `<span class="pack">${i.bottles} bottles of ${esc(i.size)} each: ${i.qty * i.bottles} labels</span>` : ""}</span><span class="q">×${i.qty}</span></li>`).join("")}</ul>
       ${o.items.length ? `<img class="preview" src="/api/preview/${encodeURIComponent(o.key)}?t=${Date.now() >> 15}" alt="">` : ""}
       ${unknown ? `<p class="hint">${unknown} product${unknown > 1 ? "s are" : " is"} not in the label list, so the label is guessed from the name. Add ${unknown > 1 ? "them" : "it"} under Labels.</p>` : ""}
       <div class="actions">
@@ -591,7 +592,7 @@ function renderRegister() {
       <h3>Reprint one part</h3>
       <div class="actions" style="margin-top:0">
         <button class="btn" id="rpWaybill" ${busy || !canWaybill ? "disabled" : ""}>Waybill only</button>
-        <button class="btn" id="rpLabels" ${busy || !o.items.length ? "disabled" : ""}>All ${o.units} label${o.units !== 1 ? "s" : ""}</button>
+        <button class="btn" id="rpLabels" ${busy || !o.items.length ? "disabled" : ""}>All ${o.labels} label${o.labels !== 1 ? "s" : ""}</button>
       </div></div>`;
   } else {
     html += `<p class="hint">Tap an order to see its items and label, print it on its own, reprint its waybill or labels, or mark it packed.</p>`;
@@ -692,7 +693,8 @@ async function lookup() {
   }
   $("#notFound").classList.remove("on");
   packing = r.order;
-  ticks = packing.items.flatMap(i => Array.from({length: i.qty}, () => ({name: i.name, done: false})));
+  ticks = packing.items.flatMap(i => Array.from({length: i.qty * (i.bottles || 1)},
+    () => ({name: i.bottles > 1 ? `${i.name}: one ${i.size} bottle` : i.name, done: false})));
   renderPack(); beep(true);
 }
 function renderPack() {
@@ -728,9 +730,10 @@ function drawLabels() {
       <td><input data-f="size" value="${esc(r.size)}" placeholder="3g"></td>
       <td><input data-f="brand" value="${esc(r.brand)}" placeholder="${esc(L.brand)}"></td>
       <td><select data-f="icon"><option value="">None</option>${L.icons.map(n => `<option ${n === r.icon ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></td>
+      <td><input data-f="bottles" value="${r.bottles || ""}" placeholder="auto" inputmode="numeric"></td>
       <td><img src="${previewUrl(r)}" alt=""></td>
       <td><button class="iconbtn" data-act="test">Test print</button> <button class="iconbtn" data-act="del">✕</button></td></tr>`).join("")
-    || `<tr><td colspan="7" class="hint">No products yet.</td></tr>`;
+    || `<tr><td colspan="8" class="hint">No products yet.</td></tr>`;
   document.querySelectorAll("#labelRows tr[data-i]").forEach(tr => {
     const i = +tr.dataset.i;
     tr.querySelectorAll("[data-f]").forEach(inp => inp.addEventListener(inp.tagName === "SELECT" ? "change" : "input", () => {
@@ -749,7 +752,7 @@ function drawLabels() {
 }
 function setDirty(v) { dirty = v; $("#dirty").hidden = !v; }
 $("#labelSearch").addEventListener("input", drawLabels);
-$("#addLabel").onclick = () => { L.rows.unshift({sku: "", title: "", size: "", brand: "", icon: ""}); $("#labelSearch").value = ""; setDirty(true); drawLabels(); };
+$("#addLabel").onclick = () => { L.rows.unshift({sku: "", title: "", size: "", brand: "", icon: "", bottles: ""}); $("#labelSearch").value = ""; setDirty(true); drawLabels(); };
 $("#saveLabels").onclick = async () => {
   const skus = L.rows.map(r => (r.sku || "").trim().toUpperCase()).filter(Boolean);
   if (new Set(skus).size !== skus.length) { notice("Can't save", "Two products have the same SKU."); return; }

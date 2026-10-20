@@ -1,6 +1,9 @@
 """Tests for the 20 Oct 2026 change list: order totals, reprinting one part of an order, and the
 "Hold orders with missing info" switch."""
+import pytest
+
 from packstation.engine import Engine
+from packstation.labels import Catalog, labels_for_order, parse_pack
 from packstation.models import Item, Order
 from packstation.sources.demo import DemoSource
 from packstation.sources.odoo import OdooSource
@@ -123,3 +126,39 @@ def test_print_anyway_also_covers_a_missing_tracking_number(tmp_path):
     assert eng.start_print_one("demo:DEMO10001")["missing"] == ["no tracking number"]
     job = eng.wait(eng.start_print_one("demo:DEMO10001", allow_incomplete=True))
     assert job.state == "done" and "demo:DEMO10001" in eng.store.printed()
+
+
+# ---------------------------------------------------------------- "15x2" best-value bundles
+
+
+@pytest.mark.parametrize("name", ["Hedione (15x2) Best Value", "Hedione Best Value (15x2) 30g",
+                                  "Hedione 30g (15g x 2) Best Value", "Hedione 2 x 15g", "Hedione 15g×2",
+                                  "Hedione (15X2 Units) Best Value", "[HED-BV] Hedione - 15x2 units - Best Value"])
+def test_bundle_names_give_two_15g_labels(tmp_path, name):
+    cat = Catalog(tmp_path / "p.csv")
+    data, known = cat.lookup(Item("", name, 1))
+    assert (data.title, data.size, data.bottles, known) == ("Hedione", "15g", 2, False)
+
+
+@pytest.mark.parametrize("name", ["Hedione 30g", "Linalool 5g", "Vanillin 10g", "Iso E Super"])
+def test_single_bottles_are_not_bundles(name):
+    assert parse_pack(name) is None
+
+
+def test_bundle_in_product_list_prints_one_label_per_bottle(tmp_path):
+    cat = Catalog(tmp_path / "p.csv")
+    cat.save([{"sku": "HED-BV", "title": "Hedione", "size": "30g"}])   # old row: one 30g label
+    order = Order("odoo", "WH/OUT/9", [Item("HED-BV", "Hedione (15x2) Best Value", 3)])
+    labels = labels_for_order(order, cat, {"width_mm": 40, "height_mm": 20})
+    assert len(labels) == 6 and cat.label_count(order) == 6
+    assert cat.lookup(order.items[0])[0].size == "15g"
+
+    cat.save([{"sku": "HED-BV", "title": "Hedione", "size": "30g", "bottles": "1"}])  # explicit: really one
+    assert cat.label_count(order) == 3 and cat.lookup(order.items[0])[0].size == "30g"
+    assert Catalog(tmp_path / "p.csv").rows["HED-BV"].bottles == 1                    # saved in the CSV
+
+
+def test_print_all_counts_bundle_labels(tmp_path):
+    eng = demo_engine(tmp_path)
+    by_name(eng)["DEMO10001"].items = [Item("", "Hedione (15x2) Best Value", 1)]
+    assert eng.plan()["labels"] == 2 + 2 + 3

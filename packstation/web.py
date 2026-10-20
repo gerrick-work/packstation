@@ -119,8 +119,10 @@ def create_app(engine: Engine) -> Flask:
             "key": o.key, "source": o.source, "platform": o.platform, "order_id": o.order_id,
             "tracking": o.tracking, "match": o.match_code, "status": o.status, "state": state,
             "ship_by": o.ship_by.isoformat() if o.ship_by else None,
-            "items": [{"sku": i.sku, "name": i.name, "qty": i.qty, "known": engine.catalog.lookup(i)[1]}
-                      for i in o.items],
+            "items": [{"sku": i.sku, "name": i.name, "qty": i.qty, "known": known,
+                       "bottles": max(data.bottles, 1), "size": data.size}
+                      for i in o.items for data, known in [engine.catalog.lookup(i)]],
+            "labels": engine.catalog.label_count(o),
             "units": o.unit_count, "has_waybill": o.has_waybill, "waybill_ready": o.waybill_ready,
             "printed_at": printed.get(o.key), "packed_at": packed.get(o.key), "error": error,
             "printed_labels": (rows.get(o.key) or {}).get("labels"),

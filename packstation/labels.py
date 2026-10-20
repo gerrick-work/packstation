@@ -4,18 +4,22 @@ whatever the product; a title too long for the label is shortened and flagged in
 
 The product list lives in data/products.csv (edited from the Labels screen; updates never touch
 it). On first run it is seeded from labels/products.csv:
-    sku,title,size,brand,icon
-    ML-SANDAL-3G,Sandalwood,3g,,corrosive
+    sku,title,size,brand,icon,bottles
+    ML-SANDAL-3G,Sandalwood,3g,,corrosive,
 An empty brand uses the default brand ("atlas origins"). `icon` is a file in assets/icons/
 (without .png), or empty. Products missing from the list fall back to their marketplace name,
 with a trailing size such as "3g" or "10ml" split off.
+
+Bundles: a product sold as several bottles ("Hedione (15x2) Best Value", "15g x 2", "2 x 15g")
+prints one label per bottle with the bottle's size (2 labels of 15g, not 1 of 30g). `bottles` in
+the product list sets this; left empty, it is read from the marketplace name.
 """
 from __future__ import annotations
 
 import csv
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -47,6 +51,50 @@ TEMPLATE = {
 }
 
 SIZE_RE = re.compile(r"^(.*?)[\s\-,(]*(\d+(?:\.\d+)?\s?(?:g|kg|ml|l|mg|oz))\)?\s*$", re.I)
+UNIT = r"(?:kg|mg|ml|g|l|oz)"
+NUM = r"\d+(?:\.\d+)?"
+# "2 x 15g" (count first, the size has a unit), then "15x2" / "15g x 2" / "15g*2" (size first).
+PACK_COUNT_FIRST = re.compile(rf"(?<![\d.])(\d+)\s*[x×*]\s*({NUM})\s?({UNIT})\b", re.I)
+PACK_SIZE_FIRST = re.compile(rf"(?<![\d.])({NUM})\s?({UNIT})?\s*[x×*]\s*(\d+)(?![\d.])(?!\s?{UNIT}\b)", re.I)
+ANY_SIZE = re.compile(rf"(?<![\d.])({NUM})\s?({UNIT})\b", re.I)
+FILLER = re.compile(r"\b(best\s*value|value\s*pack|bundle|combo|promo|twin\s*pack|\d+\s*-?\s*pack|units?|pcs|"
+                    r"pieces|bottles?)\b", re.I)
+
+
+def _num(v: float) -> str:
+    return f"{v:g}"
+
+
+def parse_pack(name: str) -> tuple[str, int, tuple[int, int]] | None:
+    """A multi-bottle pack in a product name: (size of one bottle, number of bottles, where it was
+    found), e.g. "Hedione (15x2) Best Value 30g" -> ("15g", 2, ...). None for a single bottle."""
+    m = PACK_COUNT_FIRST.search(name)
+    if m:
+        count, size, unit = int(m.group(1)), float(m.group(2)), m.group(3)
+    else:
+        m = PACK_SIZE_FIRST.search(name)
+        if not m:
+            return None
+        size, unit, count = float(m.group(1)), m.group(2), float(m.group(3))
+        if not unit and count > size:  # "2x15": the smaller number is the bottle count
+            size, count = count, size
+        if count != int(count):
+            return None
+        count = int(count)
+        if not unit:  # take the unit from another size in the name ("... 30g"), else grams
+            other = next((u for u in ANY_SIZE.finditer(name) if not m.start() <= u.start() < m.end()), None)
+            unit = other.group(2) if other else "g"
+    if not 2 <= count <= 50:
+        return None
+    return _num(size) + unit.lower(), count, m.span()
+
+
+def _pack_title(name: str, span: tuple[int, int]) -> str:
+    """The product name without the pack, its sizes and words like "Best Value"."""
+    t = name[:span[0]] + " " + name[span[1]:]
+    t = FILLER.sub(" ", ANY_SIZE.sub(" ", t))
+    t = re.sub(r"\(\s*\)|\[[^\]]*\]", " ", t)   # empty brackets, and Odoo's "[CODE]"
+    return re.sub(r"\s+", " ", t).strip(" -,/()[]")
 
 
 @lru_cache(maxsize=64)
@@ -63,6 +111,7 @@ class LabelData:
     size: str
     brand: str
     icon: str
+    bottles: int = 0   # labels per unit sold; 0 = not set (1, unless the name shows a pack)
 
 
 SEED = ROOT / "labels" / "products.csv"
@@ -88,7 +137,8 @@ class Catalog:
                     if sku:
                         self.rows[sku.upper()] = LabelData(
                             r.get("title", "").strip(), r.get("size", "").strip(),
-                            (r.get("brand") or "").strip() or self.default_brand, (r.get("icon") or "").strip())
+                            (r.get("brand") or "").strip() or self.default_brand, (r.get("icon") or "").strip(),
+                            _bottles(r.get("bottles")))
 
     def all_rows(self) -> list[dict]:
         return [{"sku": sku, **vars(d)} for sku, d in sorted(self.rows.items())]
@@ -102,25 +152,43 @@ class Catalog:
                 continue
             clean[sku] = LabelData(str(r.get("title", "")).strip(), str(r.get("size", "")).strip(),
                                    str(r.get("brand") or self.default_brand).strip(),
-                                   str(r.get("icon", "")).strip())
+                                   str(r.get("icon", "")).strip(), _bottles(r.get("bottles")))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         with open(tmp, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["sku", "title", "size", "brand", "icon"])
+            w.writerow(["sku", "title", "size", "brand", "icon", "bottles"])
             for sku, d in sorted(clean.items()):
-                w.writerow([sku, d.title, d.size, d.brand, d.icon])
+                w.writerow([sku, d.title, d.size, d.brand, d.icon, d.bottles or ""])
         tmp.replace(self.path)
         self.rows = clean
 
     def lookup(self, item: Item) -> tuple[LabelData, bool]:
-        """Returns the label data and whether it came from the catalog (False = guessed from the name)."""
+        """Returns the label data and whether it came from the catalog (False = guessed from the name).
+        `bottles` says how many labels one unit needs (a "15x2" pack: 2 labels of 15g)."""
         hit = self.rows.get(item.sku.upper()) if item.sku else None
+        pack = parse_pack(item.name)
         if hit:
-            return hit, True
+            if hit.bottles or not pack:
+                return hit, True
+            return replace(hit, size=pack[0], bottles=pack[1]), True
+        if pack:
+            return LabelData(_pack_title(item.name, pack[2]) or item.sku, pack[0], self.default_brand, "",
+                             pack[1]), False
         m = SIZE_RE.match(item.name.strip())
         title, size = (m.group(1).strip(), m.group(2).replace(" ", "")) if m else (item.name.strip(), "")
         return LabelData(title or item.sku, size, self.default_brand, ""), False
+
+
+    def label_count(self, order: Order) -> int:
+        return sum(max(i.qty, 0) * max(self.lookup(i)[0].bottles, 1) for i in order.items)
+
+
+def _bottles(v) -> int:
+    try:
+        return max(int(str(v).strip() or 0), 0)
+    except ValueError:
+        return 0
 
 
 def _mm_px(mm: float, dpi: int) -> int:
@@ -182,12 +250,12 @@ def icon_names() -> list[str]:
 
 
 def labels_for_order(order: Order, catalog: Catalog, cfg: dict) -> list[tuple[Image.Image, Item, bool]]:
-    """One label per unit, in item order. Each entry: (image, item, found_in_catalog)."""
+    """One label per bottle (units × bottles per unit), in item order. Each entry: (image, item, found_in_catalog)."""
     out = []
     code = None  # bottle labels carry no order/match code (the waybill alone identifies the parcel)
     for item in order.items:
         data, known = catalog.lookup(item)
         img = render_product_label(data, code, float(cfg.get("width_mm", 40)), float(cfg.get("height_mm", 20)),
                                    int(cfg.get("dpi", 203)), cfg.get("font"), cfg.get("template"))
-        out += [(img, item, known)] * max(item.qty, 0)
+        out += [(img, item, known)] * (max(item.qty, 0) * max(data.bottles, 1))
     return out
