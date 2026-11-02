@@ -169,6 +169,12 @@ def create_app(engine: Engine) -> Flask:
             "jobs": jobs,
             "busy": sorted(engine.busy_keys),
             "last_scan": engine.last_scan.isoformat() if engine.last_scan else None,
+            "stale": engine.is_stale(),
+            "auto_refresh": {
+                "minutes": engine.auto_refresh_minutes,
+                "on": engine.auto_refresh_on and bool(engine.auto_refresh_minutes),
+                "next": (lambda n: n.isoformat(timespec="seconds") if n else None)(engine.next_auto_refresh()),
+            },
             "config_error": engine.config_error,
             "settings": {
                 "tiktok_ship_method": engine.ship_method,

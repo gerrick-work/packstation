@@ -59,6 +59,7 @@ def main() -> None:
         from werkzeug.serving import make_server
 
         app = create_app(engine)
+        engine.start_auto_refresh()  # checks for new orders by itself, weekends included; never prints
         # A copy started by Flask's run() passes its listening socket on through restarts
         # (WERKZEUG_SERVER_FD). Close that leftover so this copy can bind the port itself.
         fd = os.environ.pop("WERKZEUG_SERVER_FD", None)

@@ -43,6 +43,8 @@ button:disabled{opacity:.4;cursor:default}
 .chips{display:flex;gap:14px;flex:1;min-width:0;overflow:hidden;color:var(--muted);font-size:13px}
 .chip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 .chip .dot{width:7px;height:7px;border-radius:50%;background:#34C759}
+.stalebar{margin:0 12px;padding:10px 14px;border-radius:10px;background:var(--redt);color:var(--red);font-weight:600}
+.stalebar[hidden]{display:none}
 .chip.bad{color:var(--red)}.chip.bad .dot{background:var(--red)}.chip.test .dot{background:#FFB020}
 .clock{font-variant-numeric:tabular-nums;font-size:14px;color:var(--muted);white-space:nowrap}
 .top .tb{margin-left:auto;background:var(--bg2);padding:8px 14px;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;font-size:15px}
@@ -322,6 +324,7 @@ td img{height:52px;border-radius:6px;border:1px solid var(--line);display:block}
     <button data-view="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
   </nav>
 
+  <div class="stalebar" id="staleBar" hidden></div>
   <main>
     <!-- ORDERS -->
     <section class="view on" id="v-orders">
@@ -405,6 +408,10 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const hhmmss = iso => iso ? new Date(iso).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"}) : "";
 const hhmm = iso => iso ? new Date(iso).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "";
+// "09:27" for today, "Mon 26 Oct 12:40" for older, so an old check can't pass for a fresh one
+const whenText = iso => { if (!iso) return ""; const d = new Date(iso);
+  return d.toDateString() === new Date().toDateString() ? hhmm(iso)
+    : d.toLocaleDateString([], {weekday:"short", day:"numeric", month:"short"}) + " " + hhmm(iso); };
 async function api(path, opts = {}) {
   const r = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
   if (r.status === 401) { location.reload(); throw new Error("PIN required"); }
@@ -494,7 +501,14 @@ const whyText = o => o.state === "held" ? "Missing: " + o.missing.join("; ") : o
 function render() {
   // chips
   const chips = S.sources.map(s => `<span class="chip ${s.error ? "bad" : s.name === "demo" ? "test" : ""}" title="${esc(s.error ? errText(s.error) : "connected")}"><span class="dot"></span>${esc(s.name)}</span>`);
-  $("#chips").innerHTML = chips.join("") + (S.last_scan ? `<span class="chip">Updated ${hhmm(S.last_scan)}</span>` : "");
+  const ar = S.auto_refresh || {};
+  const autoTip = ar.on ? `Checks by itself every ${ar.minutes} min, every day` + (ar.next ? `. Next check ${whenText(ar.next)}` : "") : "Automatic check is off";
+  $("#chips").innerHTML = chips.join("") + (S.last_scan ? `<span class="chip ${S.stale ? "bad" : ""}" title="${esc(autoTip)}"><span class="dot"></span>Updated ${esc(whenText(S.last_scan))}${ar.on ? " · auto" : ""}</span>` : "");
+  const sb = $("#staleBar");
+  sb.hidden = !S.stale;
+  if (S.stale) sb.textContent = S.last_scan
+    ? `Orders haven't been checked since ${whenText(S.last_scan)}. New orders may be missing. Press Refresh.`
+    : "Orders haven't been checked yet. Press Refresh.";
 
   // status bar
   for (const [n, p] of Object.entries(S.printers)) {

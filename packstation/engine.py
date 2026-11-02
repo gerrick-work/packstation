@@ -97,6 +97,8 @@ class Engine:
                             lambda: self.store.unmark("odoo:WH/OUT/00073"))
         self.store.run_once("2026-10-12-brand-atlas-origins", self._brand_fix)
         threading.Thread(target=self._worker, daemon=True).start()
+        self.auto_refresh_on = False   # started by the server (python -m packstation), not by scripts/tests
+        self.last_auto_try: datetime | None = None
 
     def _brand_fix(self) -> None:
         """Bottle labels used a mix of "moleculelabs" and "atlas origins": use the default brand."""
@@ -597,7 +599,7 @@ class Engine:
 
     # ---- refresh chain ------------------------------------------------------------------------
 
-    def start_refresh(self) -> Job:
+    def start_refresh(self, auto: bool = False) -> Job:
         def work(job: Job):
             before = {o.key for o in self.orders}
             odoo = self.odoo
@@ -641,9 +643,90 @@ class Engine:
                 job.summary = f"Refresh finished with problems at {datetime.now():%H:%M:%S}"
             else:
                 job.summary = f"Refresh successful {datetime.now():%H:%M:%S}, {new} new order{'s' if new != 1 else ''}"
+            if auto:
+                job.summary = "Automatic " + job.summary[0].lower() + job.summary[1:]
             self.log.add("info", job.summary)
 
-        return self.submit("refresh", "Refresh", work)
+        return self.submit("refresh", "Automatic refresh" if auto else "Refresh", work)
+
+    # ---- automatic refresh ---------------------------------------------------------------------
+
+    @property
+    def auto_refresh_minutes(self) -> int:
+        """[app] auto_refresh_minutes: how often Pack Station checks for new orders by itself, every
+        day including weekends (0 = off). It only reads orders and waybills; it never prints."""
+        try:
+            return max(0, int(self.cfg.get("app", {}).get("auto_refresh_minutes", 60)))
+        except (TypeError, ValueError):
+            return 60
+
+    @property
+    def stale_hours(self) -> float:
+        """After this long without a successful check, the screen shows a red warning."""
+        try:
+            return float(self.cfg.get("app", {}).get("stale_hours", 3))
+        except (TypeError, ValueError):
+            return 3.0
+
+    def is_stale(self, now: datetime | None = None) -> bool:
+        if self.last_scan is None:
+            return True
+        return ((now or datetime.now()) - self.last_scan).total_seconds() > self.stale_hours * 3600
+
+    def next_auto_refresh(self) -> datetime | None:
+        mins = self.auto_refresh_minutes
+        if not self.auto_refresh_on or not mins:
+            return None
+        if self.last_scan is None:
+            return datetime.now()
+        from datetime import timedelta
+        return self.last_scan + timedelta(minutes=mins)
+
+    def auto_refresh_due(self, now: datetime | None = None) -> bool:
+        """Due when the last check is older than the interval (wall clock, so a Mac that slept all
+        weekend catches up straight after it wakes) and nothing else is queued or printing."""
+        mins = self.auto_refresh_minutes
+        if not mins or self.running():
+            return False
+        now = now or datetime.now()
+        # after a failed try (no internet, Odoo down) wait 5 minutes before the next one
+        if self.last_auto_try and (now - self.last_auto_try).total_seconds() < min(mins, 5) * 60:
+            return False
+        if self.last_scan is None:
+            return True
+        return (now - self.last_scan).total_seconds() >= mins * 60
+
+    def auto_refresh_tick(self) -> Job | None:
+        if not self.auto_refresh_due():
+            return None
+        self.last_auto_try = datetime.now()
+        try:
+            job = self.start_refresh(auto=True)
+        except Busy:
+            return None
+        return job
+
+    def start_auto_refresh(self, poll_seconds: float = 30) -> None:
+        """Background loop: checks every 30 s whether a refresh is due. Survives errors."""
+        if self.auto_refresh_on:
+            return
+        self.auto_refresh_on = True
+
+        def loop():
+            import time
+            time.sleep(min(poll_seconds, 20))
+            while True:
+                try:
+                    self.reload_if_changed()
+                    self.auto_refresh_tick()
+                except Exception as e:  # never let the loop die
+                    self.log.add("error", f"Automatic refresh: {e}", "CONFIG")
+                time.sleep(poll_seconds)
+
+        threading.Thread(target=loop, daemon=True, name="auto-refresh").start()
+        mins = self.auto_refresh_minutes
+        self.log.add("info", f"Automatic refresh every {mins} minutes, every day" if mins
+                     else "Automatic refresh is off ([app] auto_refresh_minutes = 0)")
 
     # ---- printer tools -----------------------------------------------------------------------
 
