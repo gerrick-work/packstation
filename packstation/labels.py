@@ -1,4 +1,4 @@
-"""Bottle labels: one fixed template (matching the Label Expert design "Atlas Origin Finalv1"),
+"""Bottle labels: one fixed template (the boxed Atlas Origins design from Label Expert, Oct 2026),
 filled per product. Every line has a fixed font size and position, so labels look identical
 whatever the product; a long title wraps onto more lines (never cut off with "...").
 
@@ -287,49 +287,167 @@ def fit_title(draw, title: str, font_path: str | None, full_px: int, max_w: int,
     return _char_wrap(draw, title, f, max_w), f
 
 
+# ---- Bottle label design (Oct 2026, "Atlas Origins" boxed template) -------------------------------
+# Rounded black frame. Left column: the Atlas Origins "A" mark with the bottle size under it.
+# Right side: product name (caps) on top, "Atlas Origins(TM)" in the bottom row.
+# Positions in mm from the label's top-left, measured from the Label Expert templates (40 x 20 mm).
+BOX = {
+    "frame_x": 1.4, "frame_y": 1.0, "frame_w": 0.5, "radius": 1.2,
+    "col_x": 12.3, "row_y": 12.1, "rule_w": 0.25,
+    "logo": (2.9, 2.8, 11.3, 12.4),          # box the mark is fitted into (fills the column)
+    "title_x": 14.1, "title_top": 3.3, "title_cap": 2.6, "title_right_pad": 1.0, "title_bottom_pad": 1.0,
+    "foot_top": 13.6, "size_cap": 2.45, "brand_cap": 2.88,
+}
+FONT_DIR = ROOT / "assets" / "fonts"
+TITLE_FONT = FONT_DIR / "BarlowCondensed-SemiBold.ttf"
+BRAND_FONT = FONT_DIR / "BarlowCondensed-Medium.ttf"
+MARK = ROOT / "assets" / "brand" / "atlas-origins-mark.png"
+
+
+def _font_path(p: Path, override: str | None) -> str | None:
+    if override and Path(override).exists():
+        return override
+    return str(p) if p.exists() else None
+
+
+def font_for_cap(path: str | None, cap_px: float, bold: bool = True):
+    """Font whose capital H is cap_px tall."""
+    f = load_font(path, 40, bold)
+    h = f.getbbox("H", anchor="ls")
+    ratio = (h[3] - h[1]) / 40 if h[3] > h[1] else 0.7
+    return load_font(path, max(6, round(cap_px / ratio)), bold)
+
+
+def _cap(f) -> int:
+    b = f.getbbox("H", anchor="ls")
+    return b[3] - b[1]
+
+
+def _fit_caps(d, text: str, path, cap_px: float, max_w: int, max_h: int):
+    """Largest size (from cap_px down) at which the whole text fits; one line preferred down to 80%."""
+    words = text.split() or [text]
+    full = font_for_cap(path, cap_px)
+    for size in range(full.size, max(6, round(full.size * 0.8)) - 1, -1):
+        f = load_font(path, size, True)
+        if d.textlength(text, font=f) <= max_w and _cap(f) <= max_h:
+            return [text], f
+    for size in range(full.size, 5, -1):
+        f = load_font(path, size, True)
+        step = round(size * 1.05)
+        for n in range(2, len(words) + 1):
+            if _cap(f) + step * (n - 1) > max_h:
+                break
+            lines = _wrap(d, words, f, max_w, n)
+            if lines:
+                return lines, f
+        lines = _char_wrap(d, text, f, max_w)
+        if _cap(f) + step * (len(lines) - 1) <= max_h and size <= full.size * 0.6:
+            return lines, f
+    f = load_font(path, 6, True)
+    return _char_wrap(d, text, f, max_w), f
+
+
+def _size_text(size: str) -> str:
+    """"15g" -> "15 g", as on the printed design."""
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]+)\s*$", size or "")
+    return f"{m.group(1)} {m.group(2).lower()}" if m else (size or "").strip()
+
+
+def _brand_text(brand: str) -> tuple[str, bool]:
+    """Display text for the brand row, and whether it carries the TM mark."""
+    b = (brand or "").strip()
+    if b.lower() in ("atlas origins", "atlas origin"):
+        return "Atlas Origins", True
+    return (b.title() if b.islower() else b), False
+
+
 def render_product_label(data: LabelData, match_code: str | None, width_mm: float, height_mm: float,
                          dpi: int = 203, font_path: str | None = None, template: dict | None = None,
                          warnings: list | None = None) -> Image.Image:
-    """1-bit image of one bottle label in the fixed template, sized to the label roll."""
+    """1-bit image of one bottle label in the boxed Atlas Origins design, sized to the label roll.
+    (match_code is accepted for older callers but not printed: the design has no room for it.)"""
     t = {**TEMPLATE, **(template or {})}
     px = lambda mm: _mm_px(mm, dpi)  # noqa: E731
     w, h = px(width_mm), px(height_mm)
     im = Image.new("L", (w, h), 255)
     d = ImageDraw.Draw(im)
-    d.fontmode = "1"  # hinted, unsmoothed glyphs: hard letter edges at 203 dpi instead of grainy grey
-    left, right = px(t["margin_x"]), w - px(t["margin_x"])
+    d.fontmode = "1"
 
-    icon_side = px(t["icon_size"])
-    icon_x = w - px(t["icon_margin"]) - icon_side
-    has_icon = bool(data.icon) and (ROOT / "assets" / "icons" / f"{data.icon}.png").exists()
+    if (data.brand or "").strip() == "-":
+        # Plain sticker (brand "-" in the product list, e.g. "Free Gift"): only the title, centred.
+        left, right = px(t["margin_x"]), w - px(t["margin_x"])
+        lines, f = fit_title(d, data.title, font_path, px(t["title_size"]) * 3 // 2, right - left, h - px(2.0))
+        step = round(f.size * 1.08)
+        y = (h - step * len(lines)) // 2
+        for line in lines:
+            d.text(((w - d.textlength(line, font=f)) // 2, y), line, font=f, fill=0)
+            y += step
+        return im.point(lambda v: 0 if v < 160 else 255).convert("1")
 
-    # The whole name always prints, never cut off with "...": a long name first gets a slightly
-    # smaller font on one line, then wraps onto two (or more) lines, shrinking only as far as needed.
-    lines, title_font = fit_title(d, data.title, font_path, px(t["title_size"]), right - left,
-                                  px(t["size_y"] - 1.0) - px(t["title_y"]))
-    y = px(t["title_y"])
-    step = round(title_font.size * 1.08)
+    b = {**BOX, **{k[4:]: v for k, v in t.items() if k.startswith("box_")}}
+    sx = width_mm / 40.0     # the design is drawn for 40 x 20 mm; scale for other rolls
+    sy = height_mm / 20.0
+    X = lambda mm: px(mm * sx)  # noqa: E731
+    Y = lambda mm: px(mm * sy)  # noqa: E731
+    title_path = _font_path(TITLE_FONT, font_path)
+    brand_path = _font_path(BRAND_FONT, font_path) or title_path
+
+    fw = max(2, px(b["frame_w"]))
+    rw = max(2, px(b["rule_w"]))
+    x0, y0, x1, y1 = X(b["frame_x"]), Y(b["frame_y"]), w - 1 - X(b["frame_x"]), h - 1 - Y(b["frame_y"])
+    d.rounded_rectangle((x0, y0, x1, y1), radius=px(b["radius"]), outline=0, width=fw)
+    cx = X(b["col_x"])
+    d.rectangle((cx, y0, cx + rw - 1, y1), fill=0)                       # column divider
+    ry = Y(b["row_y"])
+    d.rectangle((cx, ry, x1, ry + rw - 1), fill=0)                       # row divider
+
+    # The Atlas Origins mark, fitted into its box.
+    if MARK.exists():
+        lx0, ly0, lx1, ly1 = X(b["logo"][0]), Y(b["logo"][1]), X(b["logo"][2]), Y(b["logo"][3])
+        mark = Image.open(MARK).convert("L")
+        k = min((lx1 - lx0) / mark.width, (ly1 - ly0) / mark.height)
+        mw, mh = max(1, round(mark.width * k)), max(1, round(mark.height * k))
+        mark = mark.resize((mw, mh), Image.LANCZOS).point(lambda v: 0 if v < 128 else 255)
+        im.paste(mark, (lx0 + (lx1 - lx0 - mw) // 2, ly0 + (ly1 - ly0 - mh) // 2))
+
+    # Bottle size, centred under the mark.
+    foot_base = Y(b["foot_top"]) + round(px(b["size_cap"]))
+    sf = font_for_cap(title_path, px(b["size_cap"]))
+    size = _size_text(data.size)
+    if size:
+        while d.textlength(size, font=sf) > (cx - x0 - fw - px(1.0)) and sf.size > 6:
+            sf = load_font(title_path, sf.size - 1, True)
+        d.text(((x0 + fw + cx) / 2, foot_base), size, font=sf, fill=0, anchor="ms")
+
+    # Brand row, centred in the bottom-right cell; "TM" drawn small and raised.
+    brand, tm = _brand_text(data.brand)
+    bf = font_for_cap(brand_path, px(b["brand_cap"]), bold=False)
+    tf = font_for_cap(brand_path, px(b["brand_cap"]) * 0.42, bold=False)
+    cell_l, cell_r = cx + rw, x1 - fw
+    def brand_w(f):
+        return d.textlength(brand, font=f) + (px(0.15) + d.textlength("TM", font=tf) if tm else 0)
+    while brand_w(bf) > cell_r - cell_l - px(1.4) and bf.size > 6:
+        bf = load_font(brand_path, bf.size - 1, False)
+    bx = (cell_l + cell_r - brand_w(bf)) / 2
+    brand_base = (ry + rw + y1 - fw) // 2 + _cap(bf) // 2     # cap height centred in the cell
+    d.text((bx, brand_base), brand, font=bf, fill=0, anchor="ls")
+    if tm:
+        tx = bx + d.textlength(brand, font=bf) + px(0.15)
+        d.text((tx, brand_base - _cap(bf) + _cap(tf)), "TM", font=tf, fill=0, anchor="ls")
+
+    # Product name in capitals: the whole name always prints (smaller, then wrapped), never "...".
+    title = (data.title or "").upper()
+    tx0 = X(b["title_x"])
+    max_w = x1 - fw - X(b["title_right_pad"]) - tx0
+    top = Y(b["title_top"])
+    max_h = ry - Y(b["title_bottom_pad"]) - top
+    lines, f = _fit_caps(d, title, title_path, px(b["title_cap"]), max_w, max_h)
+    if warnings is not None and f.size < font_for_cap(title_path, px(b["title_cap"])).size * 0.75:
+        warnings.append("name printed smaller to fit")
+    base = top + _cap(f)
     for line in lines:
-        d.text((left, y), line, font=title_font, fill=0)
-        y += step
-
-    small = load_font(font_path, px(t["size_size"]))
-    if data.size:
-        d.text((left, px(t["size_y"])), data.size, font=small, fill=0)
-    d.text((left, px(t["brand_y"])), data.brand, font=load_font(font_path, px(t["brand_size"])), fill=0)
-
-    code_right = right
-    if has_icon:
-        icon = Image.open(ROOT / "assets" / "icons" / f"{data.icon}.png").convert("L")
-        icon = icon.resize((icon_side, icon_side), Image.LANCZOS)
-        im.paste(icon, (icon_x, h - px(t["icon_margin"]) - icon_side))
-        code_right = icon_x - px(1.0)
-
-    if match_code:
-        # Packing match code: the last 4 characters of the waybill's tracking number.
-        code_font = load_font(font_path, px(t["code_size"]), bold=True)
-        text = f"#{match_code}"
-        d.text((code_right - d.textlength(text, font=code_font), px(t["brand_y"])), text, font=code_font, fill=0)
+        d.text((tx0, base), line, font=f, fill=0, anchor="ls")
+        base += round(f.size * 1.05)
 
     return im.point(lambda v: 0 if v < 160 else 255).convert("1")
 

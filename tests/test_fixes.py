@@ -213,7 +213,7 @@ def test_bottle_label_template_is_fixed_whatever_the_title():
     a = render_product_label(LabelData("Sandalwood", "3g", "atlas origins", ""), "278A", 40, 20)
     b = render_product_label(LabelData("Isoamyl Acetate Natural", "3g", "atlas origins", ""), "278A", 40, 20)
     c = render_product_label(LabelData("A Very Long Material Name Indeed", "3g", "atlas origins", ""), "278A", 40, 20)
-    lower = (0, 78, 320, 160)   # size line, brand line, match code: identical positions
+    lower = (0, 100, 320, 160)   # size and brand row under the divider: identical whatever the name
     assert a.crop(lower).tobytes() == b.crop(lower).tobytes() == c.crop(lower).tobytes()
 
 

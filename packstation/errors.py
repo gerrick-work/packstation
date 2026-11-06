@@ -19,6 +19,7 @@ CODES = {
     "TIKTOK-API": "Couldn't ask TikTok directly. The detail says why; Odoo's own sync is not affected.",
     "PRODUCT-UNKNOWN": "Odoo filed this item as \"TikTok Shop Sale\" and TikTok didn't say which product it is. "
                        "Nothing was printed. Fix the item on the order (or tell Claude), then print.",
+    "BUNDLE": "Couldn't work out which set variant the buyer chose. Check the order in Seller Centre and data/bundles.json.",
     "STOCK-FIX": "Packed and validated, but the real products weren't taken out of Odoo stock. The detail says why.",
     "BT-NOTFOUND": "Printer not found. Is it switched on, and is Label Expert on the phone closed?",
     "BT-PERMISSION": "This Mac hasn't allowed Bluetooth for Pack Station. System Settings > Privacy & Security > Bluetooth.",

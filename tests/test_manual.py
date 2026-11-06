@@ -93,3 +93,84 @@ def test_label_renames_and_long_names_shrink_instead_of_dots(tmp_path):
         w = []
         render_product_label(LabelData(t, "3g", "atlas origins", "corrosive"), None, 40, 20, warnings=w)
         assert not w, (t, w)
+
+
+def test_direct_order_validates_odoo_delivery_outside_synced_teams(tmp_path):
+    """Website / WhatsApp orders are on the 'Sales' team, which the Odoo source skips, so their
+    delivery is never folded in by the scan. Mark Packed must still find it by name and validate it."""
+    import json as _json
+    from packstation.sources.odoo import OdooSource
+    from packstation.web import create_app
+    from tests.test_fixes import write_cfg
+
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "manual_orders.json").write_text(_json.dumps([{
+        "order_id": "S00157", "platform": "direct", "added": date.today().isoformat(),
+        "covers": ["WH/OUT/00140"], "items": [{"sku": "SP008-3G", "name": "Cardamom 3g", "qty": 1}]}]))
+
+    def rpc(model, method, *args, **kw):
+        if model == "stock.picking" and method == "search_read" and args and args[0] == [("name", "in", ["WH/OUT/00140"])]:
+            return [{"id": 141, "name": "WH/OUT/00140"}]
+        return []
+
+    odoo = OdooSource({"only_sales_teams": ["Shopee"]}, rpc=rpc)
+    odoo.list_orders = lambda: []
+    validated = []
+    odoo.validate = lambda pid: validated.append(pid)
+    odoo.deduct_real_items = lambda order: None
+    eng = Engine(write_cfg(tmp_path), sources=[ManualSource(str(data)), odoo])
+    eng.scan()
+    [o] = eng.orders
+    assert o.odoo_picking_id is None
+    r = create_app(eng).test_client().post("/api/packed/" + o.key, json={"packed": True}).get_json()
+    assert r["validated"] and validated == [141], r
+
+
+def test_direct_order_with_unknown_delivery_is_not_marked_packed(tmp_path):
+    import json as _json
+    from packstation.sources.odoo import OdooSource
+    from packstation.web import create_app
+    from tests.test_fixes import write_cfg
+
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "manual_orders.json").write_text(_json.dumps([{
+        "order_id": "S00999", "platform": "direct", "added": date.today().isoformat(),
+        "covers": ["WH/OUT/09999"], "items": [{"sku": "SP008-3G", "name": "Cardamom 3g", "qty": 1}]}]))
+    odoo = OdooSource({"only_sales_teams": ["Shopee"]}, rpc=lambda *a, **k: [])
+    odoo.list_orders = lambda: []
+    eng = Engine(write_cfg(tmp_path), sources=[ManualSource(str(data)), odoo])
+    eng.scan()
+    [o] = eng.orders
+    r = create_app(eng).test_client().post("/api/packed/" + o.key, json={"packed": True}).get_json()
+    assert r["ok"] is False and o.key not in eng.store.packed()
+
+
+def test_shopee_trial_set_expands_to_the_variant_bottles(tmp_path):
+    import json as _json
+    from packstation.models import Item, Order
+    from packstation.sources.odoo import OdooSource
+
+    (tmp_path / "bundles.json").write_text(_json.dumps({"555": {"match": "perfume trial set", "models": {
+        "9": {"variant": "Set 5 + free Ylang", "items": [{"sku": "SP011-3G", "name": "Chrysanthemum 3g", "qty": 1},
+                                                          {"sku": "SP050-3G", "name": "Ylang 3g", "qty": 1}]}}}}))
+    odoo = OdooSource({"only_sales_teams": []}, rpc=lambda *a, **k: [])
+    odoo.data_dir = str(tmp_path)
+
+    class Api:
+        def _details(self, sns):
+            return [{"item_list": [{"item_id": 555, "model_id": 9, "model_quantity_purchased": 2},
+                                   {"item_id": 1, "model_id": 2, "model_quantity_purchased": 1}]}]
+
+    class Direct:
+        api = Api()
+
+        def _main(self):
+            pass
+
+    odoo._sp_api = Direct()
+    o = Order(source="odoo", order_id="WH/OUT/1", platform="shopee", status="", ref={"sp_ref": "SN1"},
+              items=[Item("", "Perfume Trial Set Fragrance Oil", 2), Item("SP008-3G", "Cardamom 3g", 1)])
+    odoo._expand_bundles(o)
+    assert [(i.sku, i.qty) for i in o.items] == [("SP008-3G", 1), ("SP011-3G", 2), ("SP050-3G", 2)]

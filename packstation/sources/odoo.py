@@ -252,8 +252,56 @@ class OdooSource(Source):
                         o.items, o.ref["items_from"] = real, "tiktok"
                 except PackError as e:
                     o.ref["direct_error"] = e.as_dict()
+            if o.platform == "shopee" and o.ref.get("sp_ref"):
+                self._expand_bundles(o)
             if o.platform and not o.waybill_ready:
                 self._direct_waybill(o, arrange=False)
+
+    def _bundles(self) -> dict:
+        """data/bundles.json: Shopee listings sold as sets (Perfume Trial Set). Per Shopee item id, the
+        bottles in each variant (model id), so labels and stock follow the variant the buyer chose."""
+        import json
+        import os
+
+        path = os.path.join(getattr(self, "data_dir", "") or "", "bundles.json")
+        if not os.path.exists(path):
+            return {}
+        try:
+            return json.loads(open(path, encoding="utf-8").read())
+        except ValueError:
+            return {}
+
+    def _expand_bundles(self, o: Order) -> None:
+        bundles = self._bundles()
+        keys = [b.get("match", "").lower() for b in bundles.values() if b.get("match")]
+        if not keys or not any(k in i.name.lower() for i in o.items for k in keys):
+            return
+        try:
+            self.shopee_api._main()
+            api = self.shopee_api.api
+            detail = (api._details([o.ref["sp_ref"]]) or [{}])[0]
+        except Exception as e:
+            o.ref["direct_error"] = PackError("BUNDLE", "reading the set variant from Shopee", str(e)[:160]).as_dict()
+            return
+        real: list[Item] = []
+        expanded = False
+        for li in detail.get("item_list") or []:
+            b = bundles.get(str(li.get("item_id")))
+            if not b:
+                continue
+            m = (b.get("models") or {}).get(str(li.get("model_id")))
+            if not m:
+                o.ref["direct_error"] = PackError("BUNDLE", "reading the set variant from Shopee",
+                                                  f"variant {li.get('model_name') or li.get('model_id')} is not in bundles.json").as_dict()
+                return
+            n = int(li.get("model_quantity_purchased") or 1)
+            real += [Item(str(r.get("sku", "")), str(r.get("name", "")), int(r.get("qty", 1)) * n) for r in m["items"]]
+            o.ref.setdefault("bundle_variants", []).append(m.get("variant", ""))
+            expanded = True
+        if expanded:
+            keep = [i for i in o.items if not any(k in i.name.lower() for k in keys)]
+            o.items = keep + real
+            o.ref["items_from"] = "bundle"
 
     def _use_file(self, o: Order, path) -> Order:
         o.ref["label"] = ["file", str(path)]

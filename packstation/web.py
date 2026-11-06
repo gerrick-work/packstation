@@ -247,6 +247,23 @@ def create_app(engine: Engine) -> Flask:
         if want and engine.cfg.get("odoo", {}).get("validate_when_packed", True):
             order = next((o for o in engine.orders if o.key == key), None)
             odoo = next((s for s in engine.sources if getattr(s, "name", "") == "odoo"), None)
+            # A hand-added order (website / WhatsApp direct) whose Odoo delivery is outside the synced
+            # sales teams never got folded in: look its "covers" deliveries up by name in Odoo.
+            if (order is not None and odoo is not None and order.source == "manual"
+                    and not order.odoo_picking_id and order.ref.get("covers")):
+                try:
+                    rows = odoo._x("stock.picking", "search_read", [("name", "in", list(order.ref["covers"]))],
+                                   fields=["id", "name"], step="finding the Odoo delivery", context=odoo.ctx())
+                except Exception as e:
+                    return err(e)
+                found = {r["name"] for r in rows}
+                missing = [n for n in order.ref["covers"] if n not in found]
+                if missing:
+                    e2 = PackError("ODOO-VALIDATE", "finding the Odoo delivery", "not found in Odoo: " + ", ".join(missing))
+                    engine.log.add("error", e2.text, e2.code, key)
+                    return jsonify(ok=False, error=e2.as_dict(), message="Odoo delivery not found, nothing packed"), 200
+                order.ref["odoo_picking_ids"] = [r["id"] for r in rows]
+                order.odoo_picking_id = rows[0]["id"]
             if order is not None and odoo is not None and order.odoo_picking_id and hasattr(odoo, "validate"):
                 try:
                     for pid in order.ref.get("odoo_picking_ids") or [order.odoo_picking_id]:
