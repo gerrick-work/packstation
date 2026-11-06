@@ -114,3 +114,47 @@ def test_marketplace_orders_never_asked_for_tracking(tmp_path):
     c = create_app(eng).test_client()
     r = c.post("/api/packed/odoo:WH/OUT/00081", json={"packed": True}).get_json()
     assert not r.get("needs_tracking")
+
+
+class ShippedWebsiteOdoo(WebsiteOdoo):
+    """Odoo where website delivery WH/OUT/00173 was validated (shipped) before it was packed here."""
+
+    def __init__(self):
+        super().__init__()
+        self.pickings[95].update(state="done", date_done="2026-11-06 02:24:00",
+                                 carrier_tracking_ref="MY06155308820B")
+        self.domains = []
+
+    def __call__(self, model, method, *args, **kw):
+        if model == "stock.picking" and method == "fields_get":
+            out = super().__call__(model, method, *args, **kw)
+            return {**out, "date_done": {"type": "datetime"}}
+        if model == "stock.picking" and method == "search_read" and "|" in args[0]:
+            self.domains.append(args[0])
+            sale_team = {20: "Website", 21: "Website", 22: "Website"}
+            keep = [pk for pk in self.pickings.values()
+                    if pk["state"] == "assigned"
+                    or (pk["state"] == "done" and pk.get("sale_id") and sale_team.get(pk["sale_id"][0]) == "Website")]
+            return [dict(pk) for pk in keep]
+        return super().__call__(model, method, *args, **kw)
+
+
+def test_website_order_shipped_in_odoo_first_still_listed_for_labels():
+    fake = ShippedWebsiteOdoo()
+    src = OdooSource({}, rpc=fake)
+    web = {o.order_id: o for o in src.list_orders()}["WH/OUT/00173"]
+    assert web.status == "website: shipped in Odoo"
+    assert web.tracking == "MY06155308820B" and not web.has_waybill
+    d = fake.domains[0]
+    assert ("state", "=", "done") in d and any(t[0] == "date_done" for t in d if isinstance(t, tuple))
+
+
+def test_shipped_website_order_mark_packed_needs_no_tracking(tmp_path):
+    from packstation.web import create_app
+    fake = ShippedWebsiteOdoo()
+    eng = Engine(write_cfg(tmp_path), sources=[OdooSource({}, rpc=fake)])
+    eng.scan()
+    c = create_app(eng).test_client()
+    r = c.post("/api/packed/odoo:WH/OUT/00173", json={"packed": True}).get_json()
+    assert r["ok"] and not r.get("needs_tracking")
+    assert fake.validated == [] and fake.written == []

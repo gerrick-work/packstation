@@ -71,6 +71,9 @@ class OdooSource(Source):
             self.teams |= self.website_teams
         # Sale orders with any of these tags are left off the list: unpaid website orders (bank transfer
         # / DuitNow waiting for approval) and test orders.
+        # Website deliveries already validated in Odoo (e.g. SPX booked and shipped from Odoo first) still
+        # need their bottle labels: list them for this many days after shipping, until marked packed here.
+        self.website_done_days = int(cfg.get("website_recent_done_days", 2))
         self.hold_tags = {t.strip().lower() for t in cfg.get("hold_order_tags",
                                                               ["Awaiting payment", "Receipt uploaded", "Test"])}
         # Which delivery statuses count as "to pack". Odoo: assigned = Ready, confirmed = Waiting,
@@ -205,9 +208,18 @@ class OdooSource(Source):
         bctx = dict(ctx, bin_size=True)
         if "company_id" in f:
             read.append("company_id")
-        pickings = self._x("stock.picking", "search_read",
-                           [("picking_type_code", "in", self.type_codes), ("state", "in", self.states)],
-                           fields=read, context=bctx)
+        domain = [("picking_type_code", "in", self.type_codes), ("state", "in", self.states)]
+        if self.website_teams and self.website_done_days > 0 and "date_done" in f:
+            import datetime as _dt
+            cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=self.website_done_days)).strftime("%Y-%m-%d %H:%M:%S")
+            names = sorted({t for t in self.website_teams})
+            domain = [("picking_type_code", "in", self.type_codes),
+                      "|", ("state", "in", self.states),
+                      "&", "&", ("state", "=", "done"), ("date_done", ">=", cutoff),
+                      ("sale_id.team_id.name", "=ilike", names[0]) if len(names) == 1
+                      else ("sale_id.team_id.name", "in", [n.title() for n in names])]
+            read = read + ["state"] if "state" not in read else read
+        pickings = self._x("stock.picking", "search_read", domain, fields=read, context=bctx)
         move_ids = [m for p in pickings for m in p.get("move_ids", [])]
         moves = {m["id"]: m for m in self._x("stock.move", "read", move_ids,
                                              fields=["product_id", "product_uom_qty", "sale_line_id"],
@@ -654,7 +666,8 @@ class OdooSource(Source):
             status = f"tiktok: {tt}" if tt else "tiktok"
             needs_arrange = not label and tt in self.tt_arrange_states
         elif platform == "website":
-            status = "website: SPX waybill attached" if label else "website: book SPX"
+            status = ("website: shipped in Odoo" if p.get("state") == "done"
+                      else "website: SPX waybill attached" if label else "website: book SPX")
         elif platform == "shopee":
             sp = p.get(self.f_sp_status) or ""
             status = f"shopee label: {sp}" if sp else "shopee"
