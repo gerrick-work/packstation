@@ -24,6 +24,8 @@ CODES = {
     "BT-PERMISSION": "This Mac hasn't allowed Bluetooth for Pack Station. System Settings > Privacy & Security > Bluetooth.",
     "BT-SEND": "The printer stopped receiving part-way. Check it's on and has labels, then print again.",
     "PRINT-PARTIAL": "Only part of this order printed. It is NOT marked printed; print it again.",
+    "TRACKING-NEEDED": "Website order: type the SPX tracking number first, so the customer's "
+                       "\"on the way\" email has it.",
     "CONFIG": "A setting is missing or wrong in Settings.",
     "INFO-MISSING": "Held back because something this order needs is missing. Fix it, or turn off "
                     "\"Hold orders with missing info\".",

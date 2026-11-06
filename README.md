@@ -70,6 +70,12 @@ Odoo deliveries that belong to a Shopee or TikTok order are merged with that ord
 a "printed" note on the delivery. Odoo-only orders (for example WhatsApp sales) print product
 labels only.
 
+**Website orders** (Atlas Origins shop on Odoo, sales team "Website") are listed once paid: orders
+tagged "Awaiting payment", "Receipt uploaded" or "Test" stay off the list (`hold_order_tags`). They
+print their bottle labels; SPX is booked by hand, so a waybill prints only when its PDF is attached
+to the Odoo delivery. **Mark packed** asks for the SPX tracking number, saves it on the delivery and
+then validates it, which sends the customer the "on the way" email with that number.
+
 ### Product labels: `labels/products.csv`
 
 One row per product. This file is the master list, kept in git so it's backed up and editable

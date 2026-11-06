@@ -667,7 +667,7 @@ def test_odoo_check_flags_shop_skipped_by_sales_team(tmp_path):
     r = create_app(eng).test_client().get("/api/odoo-check").get_json()
     sg = next(x for x in r["sales"] if x["team"] == "Shopee SG")
     assert sg["team_skipped"] and sg["listed"] == 0
-    assert r["teams"] == ["shopee", "tiktok shop"]
+    assert r["teams"] == ["shopee", "tiktok shop", "website"]
 
 
 # ---------------------------------------------------------------- TikTok waybills saved elsewhere

@@ -99,7 +99,7 @@ main{overflow:hidden;position:relative}
 .total{font-size:17px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .total.none{color:var(--faint)}
 .src{font-size:12px;padding:2px 8px;border-radius:6px;background:var(--bg2);color:var(--muted);white-space:nowrap}
-.src.shopee{color:#D9431F}.src.tiktok{color:var(--ink)}.src.odoo{color:#714B67}
+.src.shopee{color:#D9431F}.src.tiktok{color:var(--ink)}.src.odoo{color:#714B67}.src.website{color:#B5654F}
 .oid{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .items{font-size:15px;flex:1;color:var(--ink)}
 .items div{white-space:normal;overflow-wrap:anywhere}
@@ -688,11 +688,40 @@ function renderRegister() {
       const packing = o.state !== "packed";
       if (!packing && !await confirmBox("Undo packed?", "This only changes Pack Station. The delivery stays validated in Odoo.", "Undo packed")) return;
       const btn = $("#packOne"); btn.disabled = true;
-      const r = await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed: packing})});
+      const r = await markPacked(o, packing);
+      if (r.cancelled) { btn.disabled = false; return; }
       if (!r.ok) await confirmBox(r.validated ? "Stock not updated" : "Not validated in Odoo", errText(r.error) || r.message || "Try again.", "OK");
       kick();
     };
   }
+}
+
+async function markPacked(o, packed) {
+  let r = await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed})});
+  if (r.needs_tracking) {
+    const t = await askTracking(o);
+    if (!t) return {ok: false, cancelled: true};
+    r = await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed, tracking: t})});
+  }
+  return r;
+}
+function askTracking(o) {
+  return new Promise(done => {
+    const d = document.createElement("div");
+    d.className = "modal on";
+    d.innerHTML = `<div class="box"><h2>SPX tracking number</h2>
+      <p>Website order ${esc(o.order_id)}. Type or scan the SPX tracking number. It is saved in Odoo and goes to the customer in the "on the way" email.</p>
+      <input id="trkIn" autocomplete="off" autocapitalize="characters" placeholder="e.g. MY06155308820B"
+        style="width:100%;font-size:20px;padding:12px 14px;border:1px solid #ccc;border-radius:12px;margin:0 0 16px;box-sizing:border-box">
+      <div class="mbtns"><button class="btn solid" id="trkOk">Save and mark packed</button><button class="btn ghost" id="trkNo">Cancel</button></div></div>`;
+    document.body.appendChild(d);
+    const inp = d.querySelector("#trkIn"), close = v => { d.remove(); done(v); };
+    const ok = () => { const v = inp.value.trim().toUpperCase().replace(/\s+/g, ""); if (v.length >= 8) close(v); else inp.focus(); };
+    d.querySelector("#trkOk").onclick = ok;
+    d.querySelector("#trkNo").onclick = () => close("");
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") ok(); if (e.key === "Escape") close(""); });
+    setTimeout(() => inp.focus(), 30);
+  });
 }
 
 async function printOne(o, opts = null) {
@@ -778,7 +807,8 @@ function renderPack() {
   c.querySelectorAll(".unit").forEach(b => b.onclick = () => { ticks[b.dataset.i].done = !ticks[b.dataset.i].done; renderPack(); });
   $("#packDone").onclick = async () => {
     if (!ticks.every(t => t.done) && o.state !== "packed") { beep(false); return; }
-    const r = await api(`/api/packed/${encodeURIComponent(o.key)}`, {method: "POST", body: JSON.stringify({packed: true})});
+    const r = await markPacked(o, true);
+    if (r.cancelled) return;
     if (!r.ok) { beep(false); await confirmBox("Not validated in Odoo", errText(r.error) || r.message || "Try again.", "OK"); kick(); return; }
     beep(true); packing = null; c.classList.remove("on"); $("#scanInput").focus(); kick();
   };
