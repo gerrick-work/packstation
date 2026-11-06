@@ -224,7 +224,7 @@ class Engine:
         rows = self.store.printed_rows()
         for o in orders:
             r = rows.get(o.key)
-            if r and o.has_waybill and not r.get("tracking"):
+            if r and o.has_waybill and not r.get("tracking") and o.platform != "website":
                 self.store.unmark(o.key)
                 self.log.add("info", "Was marked printed without a waybill; back in the to-print list.", key=o.key)
 
@@ -273,7 +273,9 @@ class Engine:
         out = []
         if not o.items:
             out.append("no products")
-        if not o.has_waybill:
+        if o.platform == "website" and not o.has_waybill:
+            out.append("no SPX waybill attached to the Odoo delivery (bottle labels only)")
+        elif not o.has_waybill:
             out.append("no waybill (not a Shopee/TikTok order)")
         elif o.waybill_missing:
             out.append("no waybill yet")

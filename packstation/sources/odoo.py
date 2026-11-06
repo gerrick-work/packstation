@@ -63,6 +63,16 @@ class OdooSource(Source):
         # Only deliveries whose sale order is in these sales teams (empty list = all). Keeps bulk B2B
         # orders (e.g. 400 corporate gift sets) off the label printer, and says which platform it is.
         self.teams = {t.lower() for t in cfg.get("only_sales_teams", ["Shopee", "TikTok Shop"])}
+        # Orders from the Odoo website shop (Atlas Origins). They have no marketplace waybill: SPX is
+        # booked by hand, so Pack Station prints their bottle labels, prints a waybill PDF only when one
+        # is attached to the Odoo delivery, and asks for the SPX tracking number at Mark Packed.
+        self.website_teams = {t.lower() for t in cfg.get("website_sales_teams", ["Website"])}
+        if self.teams:
+            self.teams |= self.website_teams
+        # Sale orders with any of these tags are left off the list: unpaid website orders (bank transfer
+        # / DuitNow waiting for approval) and test orders.
+        self.hold_tags = {t.strip().lower() for t in cfg.get("hold_order_tags",
+                                                              ["Awaiting payment", "Receipt uploaded", "Test"])}
         # Which delivery statuses count as "to pack". Odoo: assigned = Ready, confirmed = Waiting,
         # waiting = Waiting another operation. Settings can add "Waiting" for warehouses without
         # reserved stock (e.g. a Singapore warehouse fulfilled from Malaysia).
@@ -209,19 +219,38 @@ class OdooSource(Source):
         sale_ids = list({p["sale_id"][0] for p in pickings if p.get("sale_id")})
         sales = {s["id"]: s for s in self._x("sale.order", "read", sale_ids,
                                              fields=[self.ref_field, "team_id", "order_line", "amount_total",
-                                                     "currency_id"], context=ctx)} if sale_ids else {}
+                                                     "currency_id", "tag_ids"], context=ctx)} if sale_ids else {}
         refs = {sid: s.get(self.ref_field) or "" for sid, s in sales.items()}
         totals = {sid: (s.get("amount_total"), (s.get("currency_id") or [0, ""])[1]) for sid, s in sales.items()}
         self._team = {sid: (s["team_id"][1] if s.get("team_id") else "") for sid, s in sales.items()}
         if self.teams:
             pickings = [p for p in pickings if p.get("sale_id")
                         and self._team.get(p["sale_id"][0], "").lower() in self.teams]
+        held = self._held_sales(sales)
+        if held:
+            pickings = [p for p in pickings if not (p.get("sale_id") and p["sale_id"][0] in held)]
         self._sold = self._sold_items(sales)
         self._sp_files = self._shopee_files([p["id"] for p in pickings])
         found = self._attached_labels(pickings)
         orders = [self._to_order(p, moves, prods, refs, found.get(p["id"]), totals) for p in pickings]
         self._fill_gaps(orders)
         return orders
+
+    def _held_sales(self, sales: dict) -> set[int]:
+        """Sale orders carrying a hold tag ("Awaiting payment", "Receipt uploaded", "Test")."""
+        if not self.hold_tags:
+            return set()
+        tag_ids = list({t for s in sales.values() for t in (s.get("tag_ids") or [])})
+        if not tag_ids:
+            return set()
+        try:
+            names = {t["id"]: (t.get("name") or "").strip().lower()
+                     for t in self._x("crm.tag", "read", tag_ids, fields=["name"], context=self.ctx())}
+        except PackError:
+            raise
+        except Exception:
+            return set()
+        return {sid for sid, s in sales.items() if any(names.get(t) in self.hold_tags for t in s.get("tag_ids") or [])}
 
     # ---- gaps Odoo leaves: placeholder items, missing waybills ----------------------------------
 
@@ -254,7 +283,7 @@ class OdooSource(Source):
                     o.ref["direct_error"] = e.as_dict()
             if o.platform == "shopee" and o.ref.get("sp_ref"):
                 self._expand_bundles(o)
-            if o.platform and not o.waybill_ready:
+            if o.platform in ("shopee", "tiktok") and not o.waybill_ready:
                 self._direct_waybill(o, arrange=False)
 
     def _bundles(self) -> dict:
@@ -407,6 +436,7 @@ class OdooSource(Source):
         if not need:
             return {}
         sale_of = {p["sale_id"][0]: p["id"] for p in need if p.get("sale_id")}
+        website = {p["id"]: self._platform(p) == "website" for p in need}
         dom = ["|", "&", ("res_model", "=", "stock.picking"), ("res_id", "in", [p["id"] for p in need]),
                "&", ("res_model", "=", "sale.order"), ("res_id", "in", list(sale_of) or [0]),
                ("mimetype", "in", ["application/pdf", "image/png", "image/jpeg"])]
@@ -425,6 +455,8 @@ class OdooSource(Source):
             looks = any(w in name for w in self._LABEL_WORDS)
             if a["res_model"] == "sale.order" and not looks:
                 continue  # a sale order's quotation PDF is not a waybill
+            if a["res_model"] == "sale.order" and website.get(pid):
+                continue  # website orders carry the customer's payment receipt, never a waybill
             rank = (looks, a["res_model"] == "stock.picking", a.get("mimetype") == "application/pdf")
             if pid not in best or rank > best[pid][0]:
                 best[pid] = (rank, a["id"])
@@ -584,6 +616,8 @@ class OdooSource(Source):
 
     def _platform(self, p: dict) -> str:
         team = getattr(self, "_team", {}).get(p["sale_id"][0], "").lower() if p.get("sale_id") else ""
+        if team and team in self.website_teams:
+            return "website"
         if "tiktok" in team:
             return "tiktok"
         if "shopee" in team:
@@ -619,6 +653,8 @@ class OdooSource(Source):
             tt = p.get(self.f_tt_status) or ""
             status = f"tiktok: {tt}" if tt else "tiktok"
             needs_arrange = not label and tt in self.tt_arrange_states
+        elif platform == "website":
+            status = "website: SPX waybill attached" if label else "website: book SPX"
         elif platform == "shopee":
             sp = p.get(self.f_sp_status) or ""
             status = f"shopee label: {sp}" if sp else "shopee"
@@ -640,7 +676,7 @@ class OdooSource(Source):
             ship_by=datetime.fromisoformat(str(when)) if when else None,
             tracking=tracking,
             needs_arrange=needs_arrange,
-            has_waybill=bool(platform),
+            has_waybill=bool(platform) and (platform != "website" or bool(label)),
             waybill_ready=bool(label),
             platform=platform,
             odoo_picking_id=p["id"],
@@ -914,6 +950,12 @@ class OdooSource(Source):
         except Exception:
             pass
         return name
+
+    def set_tracking(self, picking_id: int, tracking: str) -> None:
+        """Save the courier tracking number on the Odoo delivery (website orders: SPX booked by hand),
+        before validating, so the customer's "on the way" email carries it."""
+        self._x("stock.picking", "write", [picking_id], {self.f_tracking: tracking},
+                step="saving the tracking number in Odoo", context=self.ctx())
 
     def note_printed(self, picking_id: int, text: str) -> None:
         if self.post_note:

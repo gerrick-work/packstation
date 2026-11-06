@@ -241,7 +241,8 @@ def create_app(engine: Engine) -> Flask:
 
     @app.post("/api/packed/<path:key>")
     def packed(key):
-        want = bool((request.get_json(silent=True) or {}).get("packed", True))
+        body = request.get_json(silent=True) or {}
+        want = bool(body.get("packed", True))
         validated = False
         stock_fix = None
         if want and engine.cfg.get("odoo", {}).get("validate_when_packed", True):
@@ -265,6 +266,19 @@ def create_app(engine: Engine) -> Flask:
                 order.ref["odoo_picking_ids"] = [r["id"] for r in rows]
                 order.odoo_picking_id = rows[0]["id"]
             if order is not None and odoo is not None and order.odoo_picking_id and hasattr(odoo, "validate"):
+                # Website orders: SPX is booked by hand, and validating emails the customer their tracking
+                # number. Never validate without one; take it from the packer and save it in Odoo first.
+                if order.platform == "website" and not order.tracking:
+                    typed = str(body.get("tracking") or "").strip().upper().replace(" ", "")
+                    if not typed:
+                        return jsonify(ok=False, needs_tracking=True, order_id=order.order_id,
+                                       error=PackError("TRACKING-NEEDED", "marking packed").as_dict())
+                    try:
+                        odoo.set_tracking(order.odoo_picking_id, typed)
+                    except Exception as e:
+                        return err(e)
+                    order.tracking = typed
+                    engine.log.add("info", f"SPX tracking {typed} saved in Odoo for {order.order_id}", None, key)
                 try:
                     for pid in order.ref.get("odoo_picking_ids") or [order.odoo_picking_id]:
                         odoo.validate(pid)
